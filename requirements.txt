@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+requests
+langchain
+langchain-openai
+langchain-community
+rank-bm25
+pymysql

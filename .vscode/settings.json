@@ -1,0 +1,11 @@
+{
+  "python.defaultInterpreterPath": "/Users/apple/Desktop/算法/smart-cs-agent/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "/Users/apple/Desktop/算法/smart-cs-agent/.venv/lib/python3.10/site-packages"
+  ],
+  "basedpyright.analysis.extraPaths": [
+    "/Users/apple/Desktop/算法/smart-cs-agent/.venv/lib/python3.10/site-packages"
+  ],
+  "basedpyright.analysis.venvPath": "/Users/apple/Desktop/算法/smart-cs-agent",
+  "basedpyright.analysis.venv": ".venv"
+}

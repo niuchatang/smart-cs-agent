@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>登录 - 智慧交通客服智能体</title>
+  <style>
+    :root {
+      --bg1: #0f172a;
+      --bg2: #1d4ed8;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --border: #dbe2ef;
+      --danger: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 20% 20%, var(--bg2) 0%, var(--bg1) 55%);
+      color: var(--text);
+    }
+    .card {
+      width: min(420px, calc(100vw - 32px));
+      background: var(--card);
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      padding: 20px;
+      box-shadow: 0 18px 48px rgba(2, 6, 23, 0.35);
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 24px;
+      text-align: center;
+    }
+    .sub {
+      margin: 0 0 16px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .tab {
+      border: 1px solid var(--border);
+      background: #f8fafc;
+      color: #334155;
+      border-radius: 10px;
+      padding: 9px 10px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .tab.active {
+      background: #eaf1ff;
+      color: #1e40af;
+      border-color: #bfdbfe;
+    }
+    .field {
+      margin-bottom: 10px;
+    }
+    .captcha-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .captcha-canvas {
+      width: 120px;
+      height: 42px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #f8fafc;
+    }
+    .captcha-refresh {
+      height: 42px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #f8fafc;
+      color: #334155;
+      padding: 0 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .hint {
+      margin-top: 4px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+      min-height: 16px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 6px;
+      color: #334155;
+      font-weight: 600;
+    }
+    input {
+      width: 100%;
+      height: 42px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      padding: 0 12px;
+      font-size: 14px;
+      outline: none;
+    }
+    input:focus {
+      border-color: #93c5fd;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    }
+    button[type="submit"] {
+      width: 100%;
+      height: 42px;
+      border: none;
+      border-radius: 10px;
+      background: var(--primary);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    button[type="submit"]:hover { background: var(--primary-hover); }
+    button[type="submit"]:disabled { opacity: .65; cursor: not-allowed; }
+    .msg {
+      margin-top: 10px;
+      font-size: 13px;
+      min-height: 18px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .msg.err { color: var(--danger); }
+    .msg.ok { color: #15803d; }
+  </style>
+</head>
+<body>
+  <div id="app" class="card">
+    <h1>智慧交通客服智能体</h1>
+    <p class="sub">先登录后使用路线规划与对话功能</p>
+    <div class="tabs">
+      <button class="tab" :class="{active: mode==='login'}" type="button" @click="setMode('login')">登录</button>
+      <button class="tab" :class="{active: mode==='register'}" type="button" @click="setMode('register')">注册</button>
+    </div>
+    <form @submit.prevent="submitAuth">
+      <div class="field">
+        <label for="username">用户名</label>
+        <input id="username" v-model.trim="username" name="username" autocomplete="username" placeholder="3-32位：字母/数字/_/-" />
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input
+          id="password"
+          v-model="password"
+          name="password"
+          type="password"
+          :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
+          :placeholder="mode === 'login' ? '请输入密码' : '至少8位，包含大小写字母和数字'"
+        />
+        <div class="hint">{{ mode === "register" ? "注册密码要求：>=8位，且包含大写字母、小写字母、数字。" : "" }}</div>
+      </div>
+      <div class="field">
+        <label for="captchaInput">图形验证码</label>
+        <div class="captcha-row">
+          <input id="captchaInput" v-model.trim="captchaInput" name="captchaInput" autocomplete="off" placeholder="输入验证码" />
+          <canvas ref="captchaCanvas" class="captcha-canvas" width="120" height="42" @click="redrawCaptcha"></canvas>
+          <button class="captcha-refresh" type="button" @click="redrawCaptcha">刷新</button>
+        </div>
+      </div>
+      <button type="submit" :disabled="submitting">{{ mode === "login" ? "登录" : "注册并登录" }}</button>
+    </form>
+    <div class="msg" :class="msgType">{{ msgText }}</div>
+  </div>
+
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script>
+    const { createApp } = Vue;
+
+    createApp({
+      data() {
+        return {
+          mode: "login",
+          username: "",
+          password: "",
+          captchaInput: "",
+          captchaText: "",
+          submitting: false,
+          msgText: "",
+          msgType: "",
+        };
+      },
+      methods: {
+        setMode(nextMode) {
+          this.mode = nextMode;
+          this.msgText = "";
+          this.msgType = "";
+          this.captchaInput = "";
+          this.redrawCaptcha();
+        },
+        setMsg(text, type = "") {
+          this.msgText = text;
+          this.msgType = type;
+        },
+        makeCaptchaText() {
+          const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+          let out = "";
+          for (let i = 0; i < 4; i += 1) out += chars[Math.floor(Math.random() * chars.length)];
+          return out;
+        },
+        redrawCaptcha() {
+          this.captchaText = this.makeCaptchaText();
+          const canvas = this.$refs.captchaCanvas;
+          if (!canvas) return;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "#f8fafc";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          for (let i = 0; i < 5; i += 1) {
+            ctx.strokeStyle = `rgba(59,130,246,${0.2 + Math.random() * 0.25})`;
+            ctx.beginPath();
+            ctx.moveTo(Math.random() * 120, Math.random() * 42);
+            ctx.lineTo(Math.random() * 120, Math.random() * 42);
+            ctx.stroke();
+          }
+          for (let i = 0; i < 20; i += 1) {
+            ctx.fillStyle = `rgba(30,64,175,${0.15 + Math.random() * 0.35})`;
+            ctx.fillRect(Math.random() * 120, Math.random() * 42, 1.6, 1.6);
+          }
+          ctx.font = "bold 24px 'Courier New', monospace";
+          ctx.textBaseline = "middle";
+          for (let i = 0; i < this.captchaText.length; i += 1) {
+            const ch = this.captchaText[i];
+            const x = 18 + i * 22;
+            const y = 21 + (Math.random() * 7 - 3.5);
+            const angle = (Math.random() * 24 - 12) * (Math.PI / 180);
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            ctx.fillStyle = `rgb(${30 + Math.floor(Math.random() * 80)}, ${64 + Math.floor(Math.random() * 60)}, ${120 + Math.floor(Math.random() * 80)})`;
+            ctx.fillText(ch, -6, 0);
+            ctx.restore();
+          }
+        },
+        async checkAlreadyLogin() {
+          try {
+            const resp = await fetch("/auth/me");
+            if (resp.ok) window.location.href = "/";
+          } catch (_) {}
+        },
+        async submitAuth() {
+          const username = this.username.trim();
+          const password = this.password;
+          if (!username || !password || !this.captchaInput) {
+            this.setMsg("请输入用户名、密码和验证码", "err");
+            return;
+          }
+          if (this.captchaInput.toLowerCase() !== this.captchaText.toLowerCase()) {
+            this.setMsg("验证码错误，请重试", "err");
+            this.captchaInput = "";
+            this.redrawCaptcha();
+            return;
+          }
+          if (this.mode === "register" && !/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(password)) {
+            this.setMsg("注册密码需>=8位，且包含大小写字母和数字", "err");
+            return;
+          }
+          this.submitting = true;
+          this.setMsg(this.mode === "login" ? "登录中..." : "注册中...");
+          try {
+            const endpoint = this.mode === "login" ? "/auth/login" : "/auth/register";
+            const resp = await fetch(endpoint, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ username, password }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error((data && data.detail) || "请求失败");
+            this.setMsg("成功，正在进入系统...", "ok");
+            window.location.href = "/";
+          } catch (err) {
+            this.setMsg(String(err), "err");
+            this.redrawCaptcha();
+          } finally {
+            this.submitting = false;
+          }
+        },
+      },
+      mounted() {
+        this.redrawCaptcha();
+        this.checkAlreadyLogin();
+      },
+    }).mount("#app");
+  </script>
+</body>
+</html>

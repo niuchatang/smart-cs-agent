@@ -1,0 +1,1809 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>智慧交通客服 Agent</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #111827;
+      --panel-2: #0f172a;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --primary: #2563eb;
+      --primary-soft: #1e40af;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --page-grad-start: #1e293b;
+      --page-grad-end: #0b1220;
+      --map-border: #2e4261;
+      --map-tip-bg: rgba(2, 6, 23, 0.85);
+      --map-tip-border: #29405f;
+      --map-tip-text: #cbd5e1;
+      --title-color: #eaf2ff;
+      --title-shadow: rgba(37, 99, 235, 0.25);
+      --chat-surface: #1a1b1f;
+      --input-bg: #24262c;
+    }
+    body.theme-day {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --panel-2: #f8fafc;
+      --border: #d8e0ec;
+      --text: #0f172a;
+      --muted: #5b6b80;
+      --primary: #2563eb;
+      --primary-soft: #1d4ed8;
+      --ok: #15803d;
+      --warn: #b45309;
+      --page-grad-start: #e9eef7;
+      --page-grad-end: #f7f9fd;
+      --map-border: #cfd9ea;
+      --map-tip-bg: rgba(255, 255, 255, 0.94);
+      --map-tip-border: #d8e0ec;
+      --map-tip-text: #334155;
+      --title-color: #1e3a8a;
+      --title-shadow: rgba(30, 64, 175, 0.12);
+      --chat-surface: #eef2f7;
+      --input-bg: #ffffff;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 15% 20%, var(--page-grad-start) 0%, var(--page-grad-end) 45%);
+      color: var(--text);
+    }
+    .container {
+      max-width: 1320px;
+      margin: 16px auto;
+      padding: 0 14px 14px;
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 32px);
+      box-sizing: border-box;
+    }
+    .container > .card:first-of-type {
+      flex-shrink: 0;
+    }
+    .card {
+      background: linear-gradient(180deg, var(--panel) 0%, #0b1327 100%);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 8px 30px rgba(2, 6, 23, 0.45);
+    }
+    .title {
+      margin: 0;
+      font-size: 46px;
+      font-weight: 900;
+      letter-spacing: 3px;
+      text-align: center;
+      color: var(--title-color);
+      text-shadow: 0 10px 28px var(--title-shadow);
+      font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      transform: translateY(-6px);
+    }
+    .title-hero {
+      margin-top: 2px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(30, 64, 175, 0.12) 0%, rgba(2, 6, 23, 0.35) 100%);
+      padding: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .highway-scene {
+      position: relative;
+      height: 156px;
+      border-radius: 14px;
+      background:
+        linear-gradient(180deg, rgba(96, 165, 250, 0.16) 0%, rgba(2, 6, 23, 0.2) 55%, rgba(2, 6, 23, 0.45) 100%);
+      overflow: hidden;
+      cursor: pointer;
+    }
+    .sky-layer {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+    }
+    .cloud {
+      position: absolute;
+      height: 16px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, rgba(248, 250, 252, 0.82) 0%, rgba(226, 232, 240, 0.68) 100%);
+      box-shadow: 0 2px 10px rgba(226, 232, 240, 0.16);
+      animation: cloudDrift 14s linear infinite;
+      opacity: 0.45;
+    }
+    .cloud::before,
+    .cloud::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      background: inherit;
+    }
+    .cloud::before {
+      width: 20px;
+      height: 14px;
+      left: 9px;
+      top: -7px;
+    }
+    .cloud::after {
+      width: 24px;
+      height: 16px;
+      right: 7px;
+      top: -8px;
+    }
+    .cloud.c1 { width: 58px; top: 34px; left: 26%; animation-duration: 16s; }
+    .cloud.c2 { width: 50px; top: 24px; left: 46%; animation-duration: 19s; }
+    .cloud.c3 { width: 62px; top: 36px; left: 62%; animation-duration: 21s; }
+    @keyframes cloudDrift {
+      0% { transform: translateX(-8px); }
+      50% { transform: translateX(8px); }
+      100% { transform: translateX(-8px); }
+    }
+    .tree {
+      position: absolute;
+      bottom: 76px;
+      width: 18px;
+      height: 28px;
+      z-index: 2;
+      pointer-events: none;
+    }
+    .tree .trunk {
+      position: absolute;
+      left: 7px;
+      bottom: 0;
+      width: 4px;
+      height: 10px;
+      border-radius: 2px;
+      background: #7c4a27;
+    }
+    .tree .leaf {
+      position: absolute;
+      left: 0;
+      bottom: 8px;
+      width: 18px;
+      height: 16px;
+      border-radius: 12px;
+      background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
+    }
+    .tree.t1 { left: 6%; transform: scale(1.05); }
+    .tree.t2 { left: 13%; transform: scale(0.85); }
+    .tree.t3 { right: 12%; transform: scale(0.9); }
+    .tree.t4 { right: 5%; transform: scale(1.08); }
+    .celestial {
+      position: absolute;
+      top: 10px;
+      width: 28px;
+      height: 28px;
+      z-index: 2;
+      pointer-events: none;
+    }
+    .sun-pos { right: 6%; top: 8px; }
+    .moon-pos { left: 6%; top: 8px; }
+    .sun {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #fff7cc 0%, #fde68a 48%, #f59e0b 100%);
+      box-shadow: 0 0 16px rgba(251, 191, 36, 0.55);
+      opacity: 1;
+      transform: scale(0.9);
+    }
+    .sun::before {
+      content: "";
+      position: absolute;
+      inset: -6px;
+      border-radius: 50%;
+      border: 2px solid rgba(251, 191, 36, 0.35);
+    }
+    .moon {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #f8fafc 0%, #cbd5e1 70%, #94a3b8 100%);
+      box-shadow: 0 0 12px rgba(148, 163, 184, 0.38);
+      opacity: 0;
+      transform: scale(1);
+      overflow: hidden;
+    }
+    .moon::after {
+      content: "";
+      position: absolute;
+      top: -2px;
+      left: 12px;
+      width: 22px;
+      height: 32px;
+      border-radius: 50%;
+      background: rgba(15, 23, 42, 0.72);
+    }
+    .title-overlay {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 0;
+      height: 72px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 5;
+      padding-top: 10px;
+      background: linear-gradient(180deg, rgba(2, 6, 23, 0.08) 0%, rgba(2, 6, 23, 0.28) 100%);
+    }
+    .road {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 80px;
+      background: linear-gradient(180deg, #1f2937 0%, #0f172a 100%);
+      border-top: 1px solid rgba(148, 163, 184, 0.25);
+      z-index: 3;
+    }
+    .road::before {
+      content: "";
+      position: absolute;
+      left: -20%;
+      right: -20%;
+      top: calc(50% - 2px);
+      height: 3px;
+      background: repeating-linear-gradient(
+        90deg,
+        rgba(248, 250, 252, 0.78) 0px,
+        rgba(248, 250, 252, 0.78) 22px,
+        transparent 22px,
+        transparent 44px
+      );
+      opacity: 0.72;
+      animation: laneMove 1.4s linear infinite;
+    }
+    @keyframes laneMove {
+      from { transform: translate3d(0, 0, 0); }
+      to { transform: translate3d(-44px, 0, 0); }
+    }
+    .car {
+      position: absolute;
+      left: 50%;
+      bottom: 14px;
+      width: 66px;
+      height: 22px;
+      transform: translate3d(-50%, 0, 0);
+      will-change: transform;
+      pointer-events: none;
+      z-index: 4;
+    }
+    .headlight {
+      position: absolute;
+      right: 1px;
+      width: 5px;
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(180deg, #fffef8 0%, #fde68a 55%, #fbbf24 100%);
+      box-shadow: 0 0 6px 2px rgba(253, 230, 138, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.65);
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      opacity: 1;
+    }
+    .headlight.top { top: 7px; }
+    .headlight.bottom { top: 14px; }
+    .car-body {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 4px;
+      height: 16px;
+      border-radius: 12px 12px 8px 8px;
+      background: linear-gradient(90deg, #38bdf8 0%, #2563eb 65%, #1d4ed8 100%);
+      box-shadow: 0 2px 10px rgba(30, 64, 175, 0.45);
+    }
+    .car-top {
+      position: absolute;
+      left: 14px;
+      bottom: 14px;
+      width: 34px;
+      height: 10px;
+      border-radius: 8px 8px 3px 3px;
+      background: rgba(226, 232, 240, 0.9);
+    }
+    .wheel {
+      position: absolute;
+      bottom: 0;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #0f172a;
+      border: 2px solid #cbd5e1;
+      animation: wheelSpin 0.75s linear infinite;
+    }
+    .wheel.left { left: 10px; }
+    .wheel.right { right: 10px; }
+    @keyframes wheelSpin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .traffic-layer {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 80px;
+      pointer-events: none;
+      z-index: 4;
+      overflow: hidden;
+    }
+    .obstacle-car {
+      position: absolute;
+      width: 58px;
+      height: 20px;
+      left: 0;
+      right: auto;
+      top: auto;
+      border-radius: 10px 10px 7px 7px;
+      background: linear-gradient(90deg, #f97316 0%, #ef4444 70%, #dc2626 100%);
+      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.35);
+      will-change: transform;
+      backface-visibility: hidden;
+    }
+    .obstacle-car.reverse {
+      background: linear-gradient(90deg, #dc2626 0%, #ef4444 70%, #f97316 100%);
+    }
+    .obstacle-car::before {
+      content: "";
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      top: -7px;
+      height: 8px;
+      border-radius: 7px 7px 2px 2px;
+      background: rgba(241, 245, 249, 0.86);
+    }
+    .obstacle-headlight {
+      position: absolute;
+      left: 1px;
+      width: 5px;
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(180deg, #fffef8 0%, #fef3c7 100%);
+      box-shadow: 0 0 5px 1px rgba(254, 243, 199, 0.4);
+      pointer-events: none;
+      opacity: 1;
+      transition: opacity 0.2s ease;
+    }
+    .obstacle-car.reverse .obstacle-headlight {
+      left: auto;
+      right: 1px;
+      background: linear-gradient(180deg, #fecaca 0%, #ef4444 90%);
+      box-shadow: 0 0 5px 2px rgba(248, 113, 113, 0.35), inset 0 -1px 0 rgba(127, 29, 29, 0.35);
+    }
+    .obstacle-headlight.top { top: 6px; }
+    .obstacle-headlight.bottom { top: 12px; }
+    .obstacle-wheel {
+      position: absolute;
+      bottom: -2px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #111827;
+      border: 2px solid #cbd5e1;
+    }
+    .obstacle-wheel.left { left: 8px; }
+    .obstacle-wheel.right { right: 8px; }
+    .muted {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 6px;
+    }
+    .layout {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: 1.08fr 1fr;
+      gap: 12px;
+      min-height: min(74vh, calc(100vh - 200px));
+      max-height: calc(100vh - 200px);
+      flex: 0 0 auto;
+      width: 100%;
+      min-width: 0;
+      align-items: stretch;
+    }
+    /* 锁定高度后勿对整行 overflow:hidden，否则滚轮无法作用到右侧 .chat-box */
+    .layout.layout--height-locked {
+      max-height: none;
+      align-items: stretch;
+      overflow-x: hidden;
+      flex-shrink: 0;
+    }
+    .layout.layout--height-locked .route-card {
+      min-height: 0;
+      align-self: start;
+      max-height: none;
+      overflow: visible;
+    }
+    .layout.layout--height-locked .chat-card {
+      min-height: 0;
+      max-height: 100%;
+      overflow: hidden;
+    }
+    .route-card {
+      display: grid;
+      grid-template-rows: auto auto auto;
+      gap: 10px;
+      min-width: 0;
+      align-self: start;
+    }
+    .route-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .route-title {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 700;
+    }
+    .badge {
+      font-size: 12px;
+      color: #dbeafe;
+      background: rgba(37, 99, 235, 0.2);
+      border: 1px solid rgba(59, 130, 246, 0.45);
+      border-radius: 999px;
+      padding: 4px 10px;
+      white-space: nowrap;
+    }
+    .route-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .meta-item {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid #2a3a56;
+      border-radius: 10px;
+      padding: 10px;
+    }
+    .meta-item .k {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .meta-item .v {
+      font-size: 15px;
+      font-weight: 700;
+      color: #dbeafe;
+    }
+    .route-body {
+      background: rgba(2, 6, 23, 0.52);
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      padding: 12px;
+      display: grid;
+      grid-template-rows: auto 320px auto;
+      gap: 12px;
+      min-width: 0;
+    }
+    .waypoints {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 8px;
+      align-items: center;
+    }
+    .place {
+      border-radius: 10px;
+      border: 1px solid #334155;
+      background: #0f172a;
+      padding: 8px 10px;
+      font-size: 14px;
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+    }
+    .arrow {
+      color: #93c5fd;
+      font-size: 18px;
+    }
+    .map-shell {
+      border-radius: 12px;
+      border: 1px solid var(--map-border);
+      overflow: hidden;
+      background: #0a1221;
+      position: relative;
+    }
+    #routeMap {
+      width: 100%;
+      height: 100%;
+      min-height: 320px;
+    }
+    .map-tip {
+      position: absolute;
+      right: 8px;
+      top: 8px;
+      z-index: 420;
+      background: var(--map-tip-bg);
+      border: 1px solid var(--map-tip-border);
+      border-radius: 8px;
+      padding: 4px 8px;
+      font-size: 11px;
+      color: var(--map-tip-text);
+    }
+    .routes-list {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      min-width: 0;
+      overflow: visible;
+    }
+    .route-section {
+      border-radius: 10px;
+      border: 1px solid #29364f;
+      background: #0a1221;
+      padding: 10px;
+    }
+    .route-section h4 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: #c7d2fe;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .chip {
+      font-size: 12px;
+      color: #dbeafe;
+      background: rgba(37, 99, 235, 0.22);
+      border: 1px solid rgba(96, 165, 250, 0.3);
+      border-radius: 999px;
+      padding: 4px 8px;
+    }
+    .service-item {
+      font-size: 12px;
+      color: #cbd5e1;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid #334155;
+      margin-bottom: 6px;
+    }
+    .route-leg-label {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      margin: 4px 0 2px;
+      padding: 4px 0;
+      border-bottom: 1px dashed var(--border);
+    }
+    .route-section-hint {
+      margin: 0 0 10px;
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .highway-rich-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 8px;
+    }
+    .highway-rich-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: rgba(15, 23, 42, 0.35);
+    }
+    .highway-rich-card.muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .hw-code {
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      color: var(--text);
+    }
+    .hw-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+      line-height: 1.35;
+    }
+    .trip-hints-section h4 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      color: #c7d2fe;
+    }
+    .trip-hint-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .trip-hint-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.45);
+    }
+    .trip-hint-title {
+      font-weight: 700;
+      font-size: 13px;
+      color: #93c5fd;
+      margin-bottom: 6px;
+    }
+    .trip-hint-detail {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .chat-card {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      width: 100%;
+      min-height: 0;
+      height: 100%;
+      align-self: stretch;
+      overflow: hidden;
+    }
+    .chat-header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 2px 2px 6px;
+    }
+    .chat-header-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .tiny-btn {
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+      font-size: 12px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .chat-title {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 700;
+    }
+    .chat-subtitle {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .chat-box {
+      flex: 1 1 0;
+      min-height: 0;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      padding: 12px;
+      background: var(--chat-surface);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      scrollbar-gutter: stable;
+    }
+    .msg-block {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+    .msg-block--user {
+      align-items: flex-end;
+    }
+    .msg {
+      max-width: 78%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      margin-bottom: 0;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      font-size: 14px;
+    }
+    .msg.user {
+      margin-left: auto;
+      background: #1d4ed8;
+      color: #eff6ff;
+    }
+    .msg.agent {
+      margin-right: auto;
+      background: #1f2937;
+      color: #e2e8f0;
+    }
+    .follow-ups {
+      max-width: 92%;
+      margin-top: 8px;
+      margin-right: auto;
+    }
+    .msg-block--user .follow-ups {
+      margin-right: 0;
+      margin-left: auto;
+      text-align: right;
+    }
+    .msg-block--user .follow-ups-chips {
+      justify-content: flex-end;
+    }
+    .follow-ups-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 6px;
+      letter-spacing: 0.02em;
+    }
+    .follow-ups-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .follow-up-chip {
+      font-size: 12px;
+      padding: 6px 11px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(37, 99, 235, 0.14);
+      color: var(--text);
+      cursor: pointer;
+      text-align: left;
+      line-height: 1.35;
+      max-width: 100%;
+    }
+    .follow-up-chip:hover:not(:disabled) {
+      background: rgba(37, 99, 235, 0.22);
+    }
+    .follow-up-chip:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .meta {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #93c5fd;
+    }
+    .composer {
+      flex-shrink: 0;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: end;
+    }
+    input, textarea, button {
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      box-sizing: border-box;
+      font-size: 14px;
+    }
+    input, textarea {
+      padding: 10px 12px;
+      background: var(--input-bg);
+      color: var(--text);
+    }
+    textarea {
+      width: 100%;
+      min-height: 74px;
+      max-height: 140px;
+      resize: vertical;
+    }
+    .composer textarea:focus-visible {
+      outline: 2px solid rgba(148, 163, 184, 0.4);
+      outline-offset: 1px;
+      border-color: #64748b;
+    }
+    body.theme-day .composer textarea:focus-visible {
+      outline-color: rgba(37, 99, 235, 0.35);
+      border-color: #93c5fd;
+    }
+    button {
+      background: var(--primary);
+      color: #fff;
+      border: 1px solid transparent;
+      cursor: pointer;
+      font-weight: 600;
+      padding: 10px 12px;
+    }
+    button:disabled {
+      opacity: .6;
+      cursor: not-allowed;
+    }
+    .status {
+      font-size: 13px;
+      color: #a5b4fc;
+      margin-top: 8px;
+    }
+    .status-ok {
+      color: #86efac;
+    }
+    .status-warn {
+      color: #fbbf24;
+    }
+    .top-actions {
+      margin-top: 10px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .ghost-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ghost-btn.active {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+    .theme-icon {
+      width: 20px;
+      height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      flex: 0 0 20px;
+    }
+    .theme-icon svg {
+      width: 18px;
+      height: 18px;
+      position: absolute;
+      inset: 1px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      transition: opacity .2s ease, transform .2s ease;
+    }
+    .theme-icon .sun-svg {
+      opacity: 0;
+      transform: scale(0.9);
+    }
+    .theme-icon .moon-svg {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .theme-toggle.day .theme-icon .sun-svg {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .theme-toggle.day .theme-icon .moon-svg {
+      opacity: 0;
+      transform: scale(0.9);
+    }
+    .theme-toggle.night .theme-icon .sun-svg {
+      opacity: 0;
+      transform: scale(0.9);
+    }
+    .theme-toggle.night .theme-icon .moon-svg {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .theme-label {
+      line-height: 1;
+    }
+    .send-btn {
+      height: 74px;
+      min-width: 84px;
+      border-radius: 12px;
+      font-size: 14px;
+      letter-spacing: .5px;
+    }
+    body.theme-day .card {
+      background: linear-gradient(180deg, #ffffff 0%, #fcfdff 100%);
+      box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+    }
+    body.theme-day .title { color: var(--title-color); }
+    body.theme-day .title-hero {
+      background: linear-gradient(180deg, rgba(59, 130, 246, 0.12) 0%, rgba(241, 245, 249, 0.6) 100%);
+      border-color: #dbe4f2;
+    }
+    body.theme-day .highway-scene {
+      background: linear-gradient(180deg, rgba(147, 197, 253, 0.35) 0%, rgba(248, 250, 252, 0.9) 56%, rgba(226, 232, 240, 0.95) 100%);
+    }
+    body.theme-day .cloud {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(241, 245, 249, 0.86) 100%);
+      box-shadow: 0 2px 10px rgba(148, 163, 184, 0.18);
+      opacity: 0.95;
+    }
+    body.theme-day .tree .leaf {
+      background: linear-gradient(180deg, #4ade80 0%, #16a34a 100%);
+    }
+    body.theme-day .sun {
+      opacity: 1;
+      transform: scale(1);
+    }
+    body.theme-day .moon {
+      opacity: 0;
+      transform: scale(0.9);
+    }
+    body:not(.theme-day) .sun {
+      opacity: 0;
+      transform: scale(0.9);
+    }
+    body:not(.theme-day) .moon {
+      opacity: 1;
+      transform: scale(1);
+    }
+    body.theme-day .headlight {
+      opacity: 0;
+    }
+    body.theme-day .obstacle-headlight {
+      opacity: 0;
+    }
+    body.theme-day .title-overlay {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(30, 64, 175, 0.08) 100%);
+    }
+    body.theme-day .road {
+      background: linear-gradient(180deg, #64748b 0%, #475569 100%);
+    }
+    body.theme-day .meta-item {
+      background: #f7f9fd;
+      border-color: #dbe4f2;
+    }
+    body.theme-day .meta-item .v {
+      color: #1e40af;
+    }
+    body.theme-day .route-body,
+    body.theme-day .route-section,
+    body.theme-day .path-line,
+    body.theme-day .place {
+      background: #fdfefe;
+      border-color: #d8e0ec;
+      color: #0f172a;
+    }
+    body.theme-day .route-section h4 {
+      color: #1e3a8a;
+    }
+    body.theme-day .chip {
+      color: #1e3a8a;
+      background: #eaf1ff;
+      border-color: #bfdbfe;
+    }
+    body.theme-day .service-item {
+      background: #f8fbff;
+      border-color: #d8e7ff;
+      color: #334155;
+    }
+    body.theme-day .highway-rich-card {
+      background: rgba(248, 250, 252, 0.9);
+    }
+    body.theme-day .trip-hints-section h4 {
+      color: #1e3a8a;
+    }
+    body.theme-day .trip-hint-card {
+      background: rgba(255, 255, 255, 0.95);
+      border-color: #d8e0ec;
+    }
+    body.theme-day .trip-hint-title {
+      color: #1d4ed8;
+    }
+    body.theme-day .trip-hint-detail {
+      color: #64748b;
+    }
+    body.theme-day .msg.user {
+      background: #2563eb;
+      color: #eff6ff;
+    }
+    body.theme-day .msg.agent {
+      background: #eef2f7;
+      color: #0f172a;
+    }
+    body.theme-day .follow-up-chip {
+      background: rgba(37, 99, 235, 0.1);
+    }
+    body.theme-day .badge {
+      color: #1e3a8a;
+      background: #eaf1ff;
+      border-color: #bfdbfe;
+    }
+    body.theme-day .ghost-btn {
+      background: #ffffff;
+      color: #334155;
+      border-color: #d8e0ec;
+    }
+    body.theme-day .map-shell {
+      background: #f8fbff;
+    }
+    body.theme-day .tiny-btn {
+      background: #ffffff;
+      border-color: #d8e0ec;
+      color: #334155;
+    }
+    @media (max-width: 1040px) {
+      .layout {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+      }
+      /* 上下排列时单独限制对话区高度，避免消息把整页顶得过长 */
+      .chat-card {
+        height: auto;
+        max-height: min(58vh, 520px);
+        min-height: 280px;
+      }
+      .chat-box {
+        min-height: 0;
+      }
+      .title {
+        font-size: 34px;
+        letter-spacing: 1px;
+      }
+      .route-body {
+        min-height: 360px;
+      }
+      #routeMap {
+        min-height: 260px;
+      }
+      .send-btn {
+        height: 64px;
+        min-width: 74px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <script>
+    try {
+      document.body.classList.toggle("theme-day", localStorage.getItem("ui-theme") === "day");
+    } catch (e) {}
+  </script>
+  <div id="app" class="container">
+    <div class="card">
+      <div class="title-hero">
+        <div id="highwayScene" class="highway-scene">
+          <div class="sky-layer">
+            <div class="cloud c1"></div>
+            <div class="cloud c2"></div>
+            <div class="cloud c3"></div>
+            <div class="tree t1"><div class="leaf"></div><div class="trunk"></div></div>
+            <div class="tree t2"><div class="leaf"></div><div class="trunk"></div></div>
+            <div class="tree t3"><div class="leaf"></div><div class="trunk"></div></div>
+            <div class="tree t4"><div class="leaf"></div><div class="trunk"></div></div>
+            <div class="celestial sun-pos"><div class="sun"></div></div>
+            <div class="celestial moon-pos"><div class="moon"></div></div>
+          </div>
+          <div class="title-overlay">
+            <h1 class="title">智慧交通客服智能体</h1>
+          </div>
+          <div class="road"></div>
+          <div id="trafficLayer" class="traffic-layer"></div>
+          <div id="car" class="car">
+            <div class="car-body"></div>
+            <div class="car-top"></div>
+            <div class="headlight top"></div>
+            <div class="headlight bottom"></div>
+            <div class="wheel left"></div>
+            <div class="wheel right"></div>
+          </div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button
+          class="ghost-btn theme-toggle"
+          :class="isDayTheme ? 'day' : 'night'"
+          aria-label="切换主题模式"
+          @click="toggleTheme"
+        >
+          <span class="theme-icon" aria-hidden="true">
+            <svg class="sun-svg" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4.2"></circle>
+              <line x1="12" y1="2.8" x2="12" y2="6"></line>
+              <line x1="12" y1="18" x2="12" y2="21.2"></line>
+              <line x1="2.8" y1="12" x2="6" y2="12"></line>
+              <line x1="18" y1="12" x2="21.2" y2="12"></line>
+              <line x1="5.5" y1="5.5" x2="7.8" y2="7.8"></line>
+              <line x1="16.2" y1="16.2" x2="18.5" y2="18.5"></line>
+              <line x1="16.2" y1="7.8" x2="18.5" y2="5.5"></line>
+              <line x1="5.5" y1="18.5" x2="7.8" y2="16.2"></line>
+            </svg>
+            <svg class="moon-svg" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15.8 3.2a8.7 8.7 0 1 0 5 15.8a9.1 9.1 0 0 1 -5.3 1.7a9.4 9.4 0 1 1 0.3 -18.8z"></path>
+            </svg>
+          </span>
+          <span class="theme-label">{{ isDayTheme ? "切换到夜间模式" : "切换到白天模式" }}</span>
+        </button>
+      </div>
+    </div>
+
+    <div ref="layoutRow" class="layout">
+      <div ref="routeCard" class="card route-card">
+        <div class="route-header">
+          <h2 class="route-title">路径规划</h2>
+          <span class="badge">{{ routeBadge }}</span>
+        </div>
+        <div class="route-meta">
+          <div class="meta-item">
+            <div class="k">预计里程</div>
+            <div class="v">{{ routeDistanceText }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="k">预计时长</div>
+            <div class="v">{{ routeDurationText }}</div>
+          </div>
+        </div>
+        <div class="route-body">
+          <div class="waypoints">
+            <div class="place">起点：{{ routeOriginText }}</div>
+            <div class="arrow">→</div>
+            <div class="place">终点：{{ routeDestinationText }}</div>
+          </div>
+
+          <div class="map-shell">
+            <div id="routeMap"></div>
+            <div class="map-tip">{{ routeMapTip }}</div>
+          </div>
+
+          <div class="routes-list">
+            <template v-for="(seg, si) in routeSegments" :key="seg.key">
+              <div v-if="routeResult && routeResult.multi_segment && seg.title !== '全程'" class="route-leg-label">{{ seg.title }}</div>
+              <div class="route-section">
+                <h4>途经高速</h4>
+                <div class="highway-rich-grid">
+                  <template v-if="!seg.highways.length">
+                    <div class="highway-rich-card muted">暂无高速信息</div>
+                  </template>
+                  <div
+                    v-for="(hw, hi) in hwCardItems(seg.highways)"
+                    :key="`${seg.key}-hw-${hi}-${hw.raw}`"
+                    class="highway-rich-card"
+                  >
+                    <div class="hw-code">{{ hw.code }}</div>
+                    <div class="hw-sub">{{ hw.subtitle }}</div>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <div v-if="tripHints.length" class="route-section trip-hints-section">
+              <h4>行程提示</h4>
+              <div class="trip-hint-grid">
+                <div v-for="(th, ti) in tripHints" :key="ti" class="trip-hint-card">
+                  <div class="trip-hint-title">{{ th.title }}</div>
+                  <div class="trip-hint-detail">{{ th.detail }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card chat-card">
+        <div class="chat-header">
+          <div>
+            <h2 class="chat-title">智能对话</h2>
+          </div>
+          <div class="chat-header-actions">
+            <span class="badge">用户：{{ currentUsername || "未登录" }}</span>
+            <button class="tiny-btn" @click="newChat">新建对话</button>
+            <button class="tiny-btn" @click="clearChat">清空当前</button>
+            <button class="tiny-btn" @click="logout">退出登录</button>
+          </div>
+        </div>
+        <div ref="chatBox" class="chat-box">
+          <div
+            v-for="(msg, idx) in messages"
+            :key="`${idx}-${msg.role}-${(msg.text || '').slice(0, 24)}`"
+            class="msg-block"
+            :class="{ 'msg-block--user': msg.role === 'user' }"
+          >
+            <div :class="['msg', msg.role]">{{ msg.text }}</div>
+            <div v-if="msg.role === 'agent' && msg.followUps && msg.followUps.length" class="follow-ups">
+              <div class="follow-ups-label">你可能还想问（点击将发送该句，由助手按当前能力作答）</div>
+              <div class="follow-ups-chips">
+                <button
+                  v-for="(fu, fi) in msg.followUps"
+                  :key="fi"
+                  type="button"
+                  class="follow-up-chip"
+                  :disabled="sending"
+                  @click="submitFollowUpQuestion(idx, fi)"
+                >
+                  {{ fu.question }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="composer">
+          <textarea
+            v-model="inputMessage"
+            placeholder="例如：北京到秦皇岛；有交通事故吗？"
+            @keydown="onInputKeydown"
+          ></textarea>
+          <button class="send-btn" :disabled="sending" @click="sendMessage">发送</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script>
+    const { createApp, nextTick } = Vue;
+    const DEFAULT_USER_ID = "default";
+    const CONV_KEY = "chat-conversation-id";
+    const WELCOME_TEXT = "你好，我是智慧交通客服助手。你可以问我：路径规划、线路状态、高速事故/管制、票价规则、退票、失物招领、投诉等问题。";
+    const HIGHWAY_NAME_BY_CODE = {
+      G1: "京哈高速", G2: "京沪高速", G3: "京台高速", G4: "京港澳高速", G5: "京昆高速", G6: "京藏高速", G7: "京新高速",
+      G11: "鹤大高速", G15: "沈海高速", G18: "荣乌高速", G20: "青银高速", G22: "青兰高速", G25: "长深高速", G30: "连霍高速",
+      G35: "济广高速", G36: "宁洛高速", G40: "沪陕高速", G42: "沪蓉高速", G45: "大广高速", G50: "沪渝高速", G56: "杭瑞高速",
+      G60: "沪昆高速", G65: "包茂高速", G69: "银百高速", G70: "福银高速", G75: "兰海高速", G76: "厦蓉高速", G78: "汕昆高速",
+      G80: "广昆高速", G0111: "秦滨高速", G0211: "津汕高速", G0421: "许广高速", G0424: "武汉都市圈环线高速", G1511: "日兰高速",
+      G2513: "淮徐高速", G3511: "菏宝高速", G4213: "麻安高速", G4221: "沪武高速", G4224: "武天宜高速", G4512: "奈营高速",
+      G5012: "恩广高速", G5013: "渝蓉高速", G5021: "石渝高速", G5512: "晋新高速", G5513: "长张高速", G7011: "十天高速",
+      S1: "机场高速", S2: "沪芦高速", S7: "沪崇高速", S15: "汉蔡高速", S25: "静兴高速", S81: "鄂东环线", S86: "赤洪高速", S8105: "济乐高速",
+    };
+    function enrichHighway(raw) {
+      const s = String(raw || "").trim();
+      if (!s) return { code: "", subtitle: "", raw: s };
+      const m = s.match(/^([GS]\d{1,4})(.*)$/i);
+      if (m) {
+        const code = m[1].toUpperCase();
+        let rest = (m[2] || "").replace(/^[,，\s]+/, "");
+        if (rest && /[\u4e00-\u9fff]/.test(rest)) return { code, subtitle: rest, raw: s };
+        const known = HIGHWAY_NAME_BY_CODE[code];
+        return { code, subtitle: known || "国家/省域高速公路网", raw: s };
+      }
+      return { code: s, subtitle: s.includes("高速") ? "收费高速公路" : "道路路段", raw: s };
+    }
+    function buildRouteSegments(routeResult) {
+      if (!routeResult) return [];
+      const legs = routeResult.leg_details;
+      if (Array.isArray(legs) && legs.length) {
+        return legs.map((ld, i) => ({
+          key: "leg-" + i,
+          title: `${ld.from || ""} → ${ld.to || ""}`.trim() || `第 ${i + 1} 段`,
+          highways: Array.isArray(ld.highways) ? ld.highways : [],
+        }));
+      }
+      return [
+        {
+          key: "all",
+          title: "全程",
+          highways: Array.isArray(routeResult.highways) ? routeResult.highways : [],
+        },
+      ];
+    }
+    function highwayCardItems(list) {
+      return (Array.isArray(list) ? list : []).map((raw) => ({ ...enrichHighway(raw), raw }));
+    }
+    function normalizeFollowUps(raw) {
+      if (!Array.isArray(raw) || !raw.length) return undefined;
+      const out = raw
+        .map((x) => ({
+          question: String(x && x.question != null ? x.question : "").trim(),
+          answer: String(x && x.answer != null ? x.answer : "").trim(),
+        }))
+        .filter((x) => x.question.length >= 2);
+      return out.length ? out.slice(0, 3) : undefined;
+    }
+    let routeMap = null;
+    let routeLayer = null;
+    let markerLayer = null;
+
+    function initTitleCarAnimation() {
+      const highwayScene = document.getElementById("highwayScene");
+      const car = document.getElementById("car");
+      const trafficLayer = document.getElementById("trafficLayer");
+      if (!highwayScene || !car || !trafficLayer) return;
+      const carWidth = 66;
+      const sidePadding = 10;
+      const roadHeight = 80;
+      const lanes = [
+        { bottom: 14, dir: 1 },
+        { bottom: 54, dir: -1 },
+      ];
+      const minCarGap = 24;
+      const obstacles = [];
+      let carShiftX = 0;
+      let carBottom = lanes[0].bottom;
+      let lastTs = 0;
+      let spawnTimer = 0;
+
+      const renderCar = () => {
+        car.style.left = "50%";
+        car.style.bottom = `${carBottom.toFixed(2)}px`;
+        car.style.transform = `translate3d(calc(-50% + ${carShiftX.toFixed(2)}px), 0, 0)`;
+      };
+
+      const moveCar = (clientX, clientY) => {
+        const rect = highwayScene.getBoundingClientRect();
+        const ratioX = Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(1, rect.width)));
+        const dynamicMaxShift = Math.max(40, rect.width / 2 - carWidth / 2 - sidePadding);
+        carShiftX = (ratioX - 0.5) * 2 * dynamicMaxShift;
+        const roadTopY = rect.height - roadHeight;
+        const mouseRoadY = Math.min(rect.height - 2, Math.max(roadTopY, clientY - rect.top));
+        const laneSplit = roadTopY + roadHeight / 2;
+        carBottom = mouseRoadY < laneSplit ? lanes[1].bottom : lanes[0].bottom;
+        renderCar();
+      };
+
+      const spawnObstacle = () => {
+        const el = document.createElement("div");
+        el.className = "obstacle-car";
+        el.innerHTML = '<div class="obstacle-headlight top"></div><div class="obstacle-headlight bottom"></div><div class="obstacle-wheel left"></div><div class="obstacle-wheel right"></div>';
+        const lane = lanes[Math.floor(Math.random() * lanes.length)];
+        const laneBottom = lane.bottom;
+        const dir = lane.dir;
+        if (dir > 0) el.classList.add("reverse");
+        const hasNearCar = obstacles.some((o) => {
+          if (o.y !== laneBottom || o.dir !== dir) return false;
+          if (dir < 0) return o.x > trafficLayer.clientWidth - 230;
+          return o.x < 170;
+        });
+        if (hasNearCar) return;
+        const speed = 36;
+        const startX = dir < 0 ? trafficLayer.clientWidth + 70 : -70;
+        el.style.bottom = `${laneBottom}px`;
+        trafficLayer.appendChild(el);
+        obstacles.push({ el, x: startX, y: laneBottom, w: 58, h: 20, speed, dir, hit: false });
+      };
+
+      const intersects = (a, b) =>
+        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+      const resetRun = () => {
+        for (const o of obstacles) o.el.remove();
+        obstacles.length = 0;
+        carShiftX = 0;
+        carBottom = lanes[0].bottom;
+        spawnTimer = -0.8;
+        renderCar();
+      };
+
+      const tick = (ts) => {
+        if (!lastTs) lastTs = ts;
+        const dt = Math.min(0.05, (ts - lastTs) / 1000);
+        lastTs = ts;
+        spawnTimer += dt;
+        if (spawnTimer >= 2.1 && obstacles.length < 4) {
+          spawnTimer = 0;
+          spawnObstacle();
+        }
+
+        const carRect = {
+          x: trafficLayer.clientWidth / 2 + carShiftX - 33,
+          y: carBottom,
+          w: 66,
+          h: 22,
+        };
+        for (let i = obstacles.length - 1; i >= 0; i -= 1) {
+          const o = obstacles[i];
+          o.x += o.dir * o.speed * dt;
+          if (o.x < -90 || o.x > trafficLayer.clientWidth + 90) {
+            o.el.remove();
+            obstacles.splice(i, 1);
+          }
+        }
+
+        // Keep cars in each lane with a safe distance to avoid overlapping.
+        for (const lane of lanes) {
+          const laneCars = obstacles.filter((o) => o.y === lane.bottom && o.dir === lane.dir)
+            .sort((a, b) => a.x - b.x);
+          for (let i = 1; i < laneCars.length; i += 1) {
+            if (lane.dir < 0) {
+              // moving right->left, right-side car is behind
+              const front = laneCars[i - 1];
+              const back = laneCars[i];
+              const minBackX = front.x + front.w + minCarGap;
+              if (back.x < minBackX) back.x = minBackX;
+            } else {
+              // moving left->right, left-side car is behind
+              const back = laneCars[i - 1];
+              const front = laneCars[i];
+              const maxBackX = front.x - back.w - minCarGap;
+              if (back.x > maxBackX) back.x = maxBackX;
+            }
+          }
+        }
+
+        let crashed = false;
+        for (const o of obstacles) {
+          o.el.style.transform = `translate3d(${o.x.toFixed(2)}px, 0, 0)`;
+          if (!crashed && intersects(carRect, o)) crashed = true;
+        }
+        if (crashed) {
+          resetRun();
+        }
+        requestAnimationFrame(tick);
+      };
+      highwayScene.addEventListener("mousemove", (e) => moveCar(e.clientX, e.clientY));
+      highwayScene.addEventListener("mouseenter", (e) => moveCar(e.clientX, e.clientY));
+      highwayScene.addEventListener("mouseleave", () => {
+        // Keep the car at its last position.
+      });
+      renderCar();
+      requestAnimationFrame(tick);
+    }
+    createApp({
+      data() {
+        return {
+          currentConversationId: localStorage.getItem(CONV_KEY) || DEFAULT_USER_ID,
+          currentUsername: "",
+          messages: [],
+          inputMessage: "",
+          sending: false,
+          isDayTheme: localStorage.getItem("ui-theme") === "day",
+          routeResult: null,
+          _layoutResizeTimer: null,
+          _routeCardResizeTimer: null,
+          _routeCardRo: null,
+          layoutLockedPx: null,
+        };
+      },
+      computed: {
+        routeBadge() {
+          if (!this.routeResult) return "等待查询";
+          const sourceMap = {
+            amap_direction: "高德路径 API",
+            osrm: "实时路径 API",
+            fallback_estimation: "本地估算路径",
+          };
+          return sourceMap[this.routeResult.source] || "路径结果";
+        },
+        routeDistanceText() {
+          return this.routeResult ? `${this.routeResult.distance_km ?? "--"} km` : "-- km";
+        },
+        routeDurationText() {
+          return this.routeResult ? `${this.routeResult.duration_min ?? "--"} 分钟` : "-- 分钟";
+        },
+        routeOriginText() {
+          return this.routeResult?.origin || "请在右侧输入“从A到B怎么走”";
+        },
+        routeDestinationText() {
+          return this.routeResult?.destination || "等待规划结果";
+        },
+        routeSegments() {
+          return buildRouteSegments(this.routeResult);
+        },
+        tripHints() {
+          const th = this.routeResult && this.routeResult.trip_hints;
+          if (!Array.isArray(th)) return [];
+          return th.filter((x) => x && String(x.title || "").trim() && String(x.detail || "").trim());
+        },
+        routeMapTip() {
+          let t = "左侧地图展示规划路径折线（滚轮不缩放地图，避免影响列表与对话区滚动；请用左上角 +/- 缩放）";
+          if (this.routeResult && this.routeResult.avoid_ferry) {
+            t +=
+              "。驾车接口已关闭轮渡：线为陆路绕行；若曾见「跨海直线」多为烟大等轮渡段示意，与当前方案无关。";
+          }
+          return t;
+        },
+      },
+      watch: {
+        routeResult: {
+          handler() {
+            this.teardownRouteCardResizeObserver();
+            nextTick(() => {
+              if (!this.routeResult || !Array.isArray(this.routeResult.route_points) || this.routeResult.route_points.length < 2) return;
+              nextTick(() => this.setupRouteCardResizeObserver());
+            });
+          },
+          deep: true,
+        },
+        tripHints() {
+          if (!this.routeResult || !this.$refs.layoutRow) return;
+          this.scheduleFreezeLayoutHeight();
+        },
+      },
+      methods: {
+        teardownRouteCardResizeObserver() {
+          if (this._routeCardRo) {
+            this._routeCardRo.disconnect();
+            this._routeCardRo = null;
+          }
+          clearTimeout(this._routeCardResizeTimer);
+        },
+        setupRouteCardResizeObserver() {
+          this.teardownRouteCardResizeObserver();
+          const card = this.$refs.routeCard;
+          if (!card || !this.routeResult || typeof ResizeObserver === "undefined") return;
+          const self = this;
+          this._routeCardRo = new ResizeObserver(() => {
+            const row = self.$refs.layoutRow;
+            if (!row || !row.classList.contains("layout--height-locked")) return;
+            clearTimeout(self._routeCardResizeTimer);
+            self._routeCardResizeTimer = setTimeout(() => self.scheduleFreezeLayoutHeight(), 160);
+          });
+          this._routeCardRo.observe(card);
+        },
+        unfreezeLayoutHeight() {
+          const el = this.$refs.layoutRow;
+          if (!el) return;
+          el.classList.remove("layout--height-locked");
+          el.style.height = "";
+          el.style.minHeight = "";
+          this.layoutLockedPx = null;
+        },
+        clampLayoutIfLocked() {
+          const el = this.$refs.layoutRow;
+          const cap = this.layoutLockedPx;
+          if (!el || cap == null || !el.classList.contains("layout--height-locked")) return;
+          const now = Math.ceil(el.getBoundingClientRect().height);
+          if (now > cap + 1) {
+            el.style.height = `${cap}px`;
+            el.style.minHeight = `${cap}px`;
+          }
+        },
+        /** 按左侧路径卡片自然高度锁定整行；右侧同高，仅在 .chat-box 内滚动 */
+        freezeLayoutHeightNow() {
+          const layout = this.$refs.layoutRow;
+          const routeCard = this.$refs.routeCard;
+          if (!layout || !routeCard || !this.routeResult) return;
+          const pts = this.routeResult.route_points;
+          const hasPath = Array.isArray(pts) && pts.length >= 2;
+          if (!hasPath) return;
+          const th = this.routeResult.trip_hints;
+          const hintsReady =
+            !Array.isArray(th) || th.length === 0 || this.tripHints.length > 0;
+          if (!hintsReady) return;
+          if (routeMap) routeMap.invalidateSize();
+          const hRaw = Math.ceil(routeCard.getBoundingClientRect().height);
+          const h = Math.max(280, hRaw);
+          this.layoutLockedPx = h;
+          layout.style.height = `${h}px`;
+          layout.style.minHeight = `${h}px`;
+          layout.classList.add("layout--height-locked");
+          if (routeMap) routeMap.invalidateSize();
+        },
+        scheduleFreezeLayoutHeight() {
+          this.unfreezeLayoutHeight();
+          nextTick(() => {
+            nextTick(() => {
+              setTimeout(() => {
+                if (routeMap) routeMap.invalidateSize();
+                requestAnimationFrame(() => {
+                  this.freezeLayoutHeightNow();
+                  setTimeout(() => {
+                    if (routeMap) routeMap.invalidateSize();
+                  }, 220);
+                });
+              }, 280);
+            });
+          });
+        },
+        hwCardItems(list) {
+          return highwayCardItems(list);
+        },
+        getUserId() {
+          return this.currentConversationId || DEFAULT_USER_ID;
+        },
+        applyTheme() {
+          document.body.classList.toggle("theme-day", this.isDayTheme);
+          localStorage.setItem("ui-theme", this.isDayTheme ? "day" : "night");
+        },
+        toggleTheme() {
+          this.isDayTheme = !this.isDayTheme;
+          this.applyTheme();
+        },
+        async ensureAuth() {
+          const resp = await fetch("/auth/me");
+          if (!resp.ok) {
+            window.location.href = "/login";
+            throw new Error("未登录");
+          }
+          const data = await resp.json();
+          this.currentUsername = (data.user && data.user.username) || "";
+        },
+        initMap() {
+          routeMap = L.map("routeMap", {
+            zoomControl: true,
+            scrollWheelZoom: false,
+          }).setView([35.8617, 104.1954], 4);
+          L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+          }).addTo(routeMap);
+          routeLayer = L.layerGroup().addTo(routeMap);
+          markerLayer = L.layerGroup().addTo(routeMap);
+        },
+        renderRouteOnMap() {
+          if (!routeMap || !this.routeResult) return;
+          routeLayer.clearLayers();
+          markerLayer.clearLayers();
+          const points = Array.isArray(this.routeResult.route_points) ? this.routeResult.route_points : [];
+          if (points.length < 2) return;
+          const polyline = L.polyline(points, { color: "#3b82f6", weight: 5, opacity: 0.9 }).addTo(routeLayer);
+          L.marker(points[0]).addTo(markerLayer).bindPopup(`起点：${this.routeResult.origin || "起点"}`);
+          L.marker(points[points.length - 1]).addTo(markerLayer).bindPopup(`终点：${this.routeResult.destination || "终点"}`);
+          routeMap.fitBounds(polyline.getBounds(), { padding: [24, 24] });
+          nextTick(() => {
+            if (routeMap) routeMap.invalidateSize();
+          });
+        },
+        scrollChat() {
+          nextTick(() => {
+            const box = this.$refs.chatBox;
+            if (box) box.scrollTop = box.scrollHeight;
+            this.clampLayoutIfLocked();
+          });
+        },
+        appendMessage(role, text, followUps) {
+          const fu = normalizeFollowUps(followUps);
+          this.messages.push({
+            role,
+            text,
+            followUps: fu,
+          });
+          this.scrollChat();
+          nextTick(() => this.clampLayoutIfLocked());
+        },
+        async postChatMessage(message) {
+          this.sending = true;
+          try {
+            const resp = await fetch("/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ user_id: this.getUserId(), message }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              if (resp.status === 401) {
+                window.location.href = "/login";
+                return;
+              }
+              throw new Error(JSON.stringify(data));
+            }
+            this.appendMessage("agent", data.reply, data.follow_ups);
+            const routeResult = (data.tool_results || []).find((x) => x.tool === "query_route_plan" && x.success);
+            if (routeResult) {
+              this.unfreezeLayoutHeight();
+              this.routeResult = routeResult;
+              nextTick(() => {
+                this.renderRouteOnMap();
+                this.scheduleFreezeLayoutHeight();
+              });
+            }
+          } catch (e) {
+            this.appendMessage("agent", `请求失败: ${String(e)}`);
+          } finally {
+            this.sending = false;
+          }
+        },
+        async sendMessage() {
+          const message = this.inputMessage.trim();
+          if (!message || this.sending) return;
+          this.appendMessage("user", message);
+          this.inputMessage = "";
+          await this.postChatMessage(message);
+        },
+        async submitFollowUpQuestion(msgIdx, fi) {
+          const m = this.messages[msgIdx];
+          const q = m && m.followUps && m.followUps[fi] ? String(m.followUps[fi].question || "").trim() : "";
+          if (!q || this.sending) return;
+          this.appendMessage("user", q);
+          await this.postChatMessage(q);
+        },
+        async loadHistory() {
+          this.messages = [];
+          try {
+            const resp = await fetch(`/history/${encodeURIComponent(this.getUserId())}`);
+            const data = await resp.json();
+            if (!resp.ok) {
+              if (resp.status === 401) {
+                window.location.href = "/login";
+                return;
+              }
+              throw new Error(JSON.stringify(data));
+            }
+            const items = data.items || [];
+            if (!items.length) {
+              this.appendMessage("agent", WELCOME_TEXT);
+              return;
+            }
+            items.forEach((it) => {
+              const role = it.role === "agent" ? "agent" : "user";
+              const fu = role === "agent" ? normalizeFollowUps(it.meta && it.meta.follow_ups) : undefined;
+              this.messages.push({
+                role,
+                text: it.content,
+                followUps: fu,
+              });
+            });
+            this.scrollChat();
+            nextTick(() => this.clampLayoutIfLocked());
+          } catch (e) {
+            this.appendMessage("agent", `加载历史失败: ${String(e)}`);
+          }
+        },
+        async clearChat() {
+          try {
+            await fetch(`/history/${encodeURIComponent(this.getUserId())}`, { method: "DELETE" });
+          } catch (_) {}
+          this.messages = [{ role: "agent", text: WELCOME_TEXT }];
+          this.scrollChat();
+        },
+        newChat() {
+          this.currentConversationId = `conv-${Date.now()}`;
+          localStorage.setItem(CONV_KEY, this.currentConversationId);
+          this.messages = [{ role: "agent", text: WELCOME_TEXT }];
+          this.routeResult = null;
+          this.unfreezeLayoutHeight();
+          this.scrollChat();
+        },
+        async logout() {
+          try {
+            await fetch("/auth/logout", { method: "POST" });
+          } catch (_) {}
+          window.location.href = "/login";
+        },
+        onInputKeydown(event) {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            this.sendMessage();
+          }
+        },
+      },
+      async mounted() {
+        this.applyTheme();
+        initTitleCarAnimation();
+        this.initMap();
+        this._onLayoutResize = () => {
+          const el = this.$refs.layoutRow;
+          if (!el || !el.classList.contains("layout--height-locked")) return;
+          clearTimeout(this._layoutResizeTimer);
+          this._layoutResizeTimer = setTimeout(() => {
+            this.unfreezeLayoutHeight();
+            nextTick(() => {
+              if (this.routeResult) this.scheduleFreezeLayoutHeight();
+            });
+          }, 200);
+        };
+        window.addEventListener("resize", this._onLayoutResize);
+        this._layoutRo = null;
+        nextTick(() => {
+          const el = this.$refs.layoutRow;
+          if (!el || typeof ResizeObserver === "undefined") return;
+          this._layoutRo = new ResizeObserver(() => {
+            this.clampLayoutIfLocked();
+          });
+          this._layoutRo.observe(el);
+        });
+        try {
+          await this.ensureAuth();
+        } catch (_) {
+          return;
+        }
+        await this.loadHistory();
+      },
+      beforeUnmount() {
+        window.removeEventListener("resize", this._onLayoutResize);
+        clearTimeout(this._layoutResizeTimer);
+        this.teardownRouteCardResizeObserver();
+        if (this._layoutRo) {
+          this._layoutRo.disconnect();
+          this._layoutRo = null;
+        }
+      },
+    }).mount("#app");
+  </script>
+</body>
+</html>
