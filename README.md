@@ -1,3 +1,14 @@
+## 预览
+
+<img width="1508" height="905" alt="截屏2026-04-02 17 47 41" src="https://github.com/user-attachments/assets/620e09e3-eb27-4476-b181-3f4797d2456c" />
+
+<img width="1508" height="905" alt="截屏2026-04-02 17 48 25" src="https://github.com/user-attachments/assets/922bcf0e-62a2-4f3b-a9e7-165535663f85" />
+
+<img width="1508" height="905" alt="截屏2026-04-02 17 48 06" src="https://github.com/user-attachments/assets/668a958b-91ab-4096-8948-da5f7a2e0b0e" />
+
+<img width="1508" height="905" alt="截屏2026-04-02 17 48 25" src="https://github.com/user-attachments/assets/8eb83ec3-96e6-40bc-9d94-80c76903e046" />
+
+
 # 智慧交通客服智能体（Smart CS Agent）
 
 面向**高速公路 / 出行咨询**场景的对话式系统：对外表现为**智能客服**（多轮问答、业务引导），工程上实现为**工具型智能体**（意图识别 → 规划动作 → 调用 API / 本地工具 → 生成回复）。后端基于 **FastAPI + LangChain**；**对话模型使用 DeepSeek**（官方 OpenAI 兼容 `/v1` 接口）。实现上通过 LangChain 的 **`ChatOpenAI`** 客户端调用该协议——这是类名/包名（`langchain-openai`），**不表示调用 OpenAI 官方**。未配置 DeepSeek 时，仍可通过 `OPENAI_*` 环境变量接入其它 **同一协议** 的厂商作为备选。前端提供 **Vue 3（主）** 与 **纯静态 HTML（兜底）** 两套界面。
