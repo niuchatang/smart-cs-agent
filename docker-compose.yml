@@ -1,13 +1,14 @@
 # 智慧交通客服智能体 — Docker Compose
-# 使用：复制 .env.example 为 .env，设置 MYSQL_ROOT_PASSWORD 与 DEEPSEEK_API_KEY 等，然后：
+# 无 .env 也可启动（镜像与 compose 内建默认库密码等）；有 .env 时仍可覆盖。
 #   docker compose up -d --build
+# 仅用远程镜像：docker compose pull && docker compose up -d
 
 services:
   mysql:
     image: mysql:8.0
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-156718}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-smart_cs_agent}
     volumes:
       - mysql_data:/var/lib/mysql
@@ -25,20 +26,19 @@ services:
       start_period: 25s
 
   app:
+    image: niuchatang/smart-cs-agent:latest
     build: .
     restart: unless-stopped
     ports:
       - "${APP_PORT:-8010}:8010"
-    env_file:
-      - .env
     environment:
-      # 覆盖 .env 里面向本机开发时的值，确保在容器内走 TCP 连 compose 网络中的 MySQL
+      # 确保在容器内走 TCP 连 compose 网络中的 MySQL（覆盖镜像内 MYSQL_HOST 等）
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
       MYSQL_UNIX_SOCKET: ""
       MYSQL_DATABASE: ${MYSQL_DATABASE:-smart_cs_agent}
       MYSQL_USER: ${MYSQL_USER:-root}
-      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-156718}
     volumes:
       # 会话 JSON 持久化（避免容器删除后对话丢失）
       - app_data:/app/data
