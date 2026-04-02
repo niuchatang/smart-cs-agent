@@ -8,7 +8,7 @@ import secrets
 import time
 import hashlib
 import hmac
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, cast
 
@@ -80,9 +80,18 @@ class HistoryResponse(BaseModel):
     items: List[HistoryItem]
 
 
-class AuthRequest(BaseModel):
-    username: str = Field(..., min_length=3, max_length=32)
+class LoginRequest(BaseModel):
+    """登录：密码至少 6 位（与历史账号兼容）。"""
+
+    username: str = Field(..., min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_\-]+$")
     password: str = Field(..., min_length=6, max_length=64)
+
+
+class RegisterRequest(BaseModel):
+    """注册：密码至少 8 位，与 AuthStore._validate_register_password 一致，避免仅前端校验导致 422 含义不清。"""
+
+    username: str = Field(..., min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_\-]+$")
+    password: str = Field(..., min_length=8, max_length=64)
 
 
 class AuthUser(BaseModel):
@@ -151,7 +160,8 @@ class AuthStore:
     def create_session(self, user_id: int) -> tuple[str, datetime]:
         self._assert_enabled()
         token = secrets.token_urlsafe(32)
-        expires_at = datetime.now() + timedelta(days=7)
+        # 使用 UTC 写入 DATETIME，与查询中 UTC_TIMESTAMP() 一致，避免本机/容器与 MySQL 时区不一致导致「刚登录就失效」
+        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=7)
         with self._connect_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO user_sessions(user_id, token, expires_at) VALUES(%s, %s, %s)", (user_id, token, expires_at))
@@ -167,7 +177,7 @@ class AuthStore:
                     SELECT u.id AS user_id, u.username AS username
                     FROM user_sessions s
                     JOIN users u ON s.user_id = u.id
-                    WHERE s.token=%s AND s.expires_at > NOW()
+                    WHERE s.token=%s AND s.expires_at > UTC_TIMESTAMP()
                     """,
                     (token,),
                 )
@@ -216,7 +226,7 @@ class AuthStore:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """
                 )
-                cur.execute("DELETE FROM user_sessions WHERE expires_at <= NOW()")
+                cur.execute("DELETE FROM user_sessions WHERE expires_at <= UTC_TIMESTAMP()")
                 conn.commit()
 
     def _connect_server(self) -> Any:
@@ -3962,7 +3972,8 @@ if VUE_DIST_DIR.exists():
 
 
 def _set_session_cookie(resp: Response, token: str, expires_at: datetime) -> None:
-    max_age = max(0, int((expires_at - datetime.now()).total_seconds()))
+    # 与 create_session 的 7 天一致；用固定秒数避免本机时间与 DB 比较时的边界误差导致 max_age=0
+    max_age = 7 * 24 * 60 * 60
     resp.set_cookie(
         key=SESSION_COOKIE,
         value=token,
@@ -4017,7 +4028,7 @@ def login_page(request: Request) -> Response:
 
 
 @app.post("/auth/register", response_model=AuthResponse)
-def register(payload: AuthRequest, response: Response) -> AuthResponse:
+def register(payload: RegisterRequest, response: Response) -> AuthResponse:
     try:
         user = auth_store.register(payload.username, payload.password)
         token, expires_at = auth_store.create_session(int(user["id"]))
@@ -4030,7 +4041,7 @@ def register(payload: AuthRequest, response: Response) -> AuthResponse:
 
 
 @app.post("/auth/login", response_model=AuthResponse)
-def login(payload: AuthRequest, response: Response) -> AuthResponse:
+def login(payload: LoginRequest, response: Response) -> AuthResponse:
     try:
         user = auth_store.login(payload.username, payload.password)
         token, expires_at = auth_store.create_session(int(user["id"]))

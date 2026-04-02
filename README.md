@@ -399,7 +399,7 @@ uvicorn main:app --reload --port 8010
 ```
 
 - 主页：<http://127.0.0.1:8010>（未登录会跳转登录页）
-- 开发调试前端：`frontend` 目录下 `npm run dev`（需自行配置代理到后端或 CORS，生产环境以构建进 `static-vue` 为主）
+- 开发调试前端：`frontend` 目录下 `npm run dev`（`vite.config.js` 已把 `/auth`、`/chat`、`/history` 等代理到本机 `http://127.0.0.1:8010`，需先启动后端；端口不同可设环境变量 `VITE_API_TARGET`）
 
 ---
 

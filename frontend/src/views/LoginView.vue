@@ -92,6 +92,8 @@ async function submitAuth() {
       username: username.value.trim(),
       password: password.value,
     })
+    // 确认 Cookie 已生效后再进主页，避免误判「注册成功却未登录」
+    await apiGet('/auth/me')
     setMsg('成功，正在进入系统...', 'ok')
     router.replace('/')
   } catch (err) {
