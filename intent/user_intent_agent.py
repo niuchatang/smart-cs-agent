@@ -156,7 +156,10 @@ class UserIntentAgent:
         plan = dict(llm_plan)
         plan["actions"] = list(plan.get("actions", [])) if isinstance(plan.get("actions"), list) else []
         intent = str(plan.get("intent", "unknown"))
-        road_query = any(k in message for k in ["高速", "事故", "管制", "封闭", "拥堵", "路况"])
+        road_query = any(
+            k in message
+            for k in ["高速", "事故", "管制", "封闭", "拥堵", "路况", "好走", "好走吗", "畅通", "堵车", "堵不堵"]
+        )
         transit_query = any(k in message for k in ["地铁", "公交", "班次", "首班", "末班", "延误"])
 
         if road_query and not transit_query and intent == "realtime_status":
@@ -252,7 +255,8 @@ class UserIntentAgent:
                         elif route_points:
                             out_params["context_points"] = route_points
                         normalized_actions.append({"tool": "query_highway_condition", "params": out_params})
-                else:
+                elif tool != "query_weather":
+                    # LLM 常把「G2 高速好走吗」误打成 query_weather；路况归一化阶段丢弃误带的查天气
                     normalized_actions.append({"tool": tool, "params": params})
             if not explicit_target and route_highways:
                 normalized_actions = []
@@ -299,7 +303,10 @@ class UserIntentAgent:
             else:
                 normalized_wx.append(action)
         plan["actions"] = normalized_wx
-        if any(isinstance(a, dict) and a.get("tool") == "query_weather" for a in plan["actions"]):
+        # 勿在已纠正为高速路况时覆盖 intent（否则 explicit G2 + 误带 query_weather 会变成查天气）
+        if str(plan.get("intent", "")) != "highway_condition" and any(
+            isinstance(a, dict) and a.get("tool") == "query_weather" for a in plan["actions"]
+        ):
             plan["intent"] = "weather_query"
 
         return plan

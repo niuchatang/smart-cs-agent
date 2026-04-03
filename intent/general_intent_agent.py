@@ -46,7 +46,22 @@ class GeneralIntentAgent:
         )
         roadish = any(
             k in text
-            for k in ["路况", "拥堵", "好走吗", "事故", "管制", "封闭", "封路", "高速", "高架", "环线"]
+            for k in [
+                "路况",
+                "拥堵",
+                "好走",
+                "好走吗",
+                "畅通",
+                "堵车",
+                "堵不堵",
+                "事故",
+                "管制",
+                "封闭",
+                "封路",
+                "高速",
+                "高架",
+                "环线",
+            ]
         )
         if not weather_kw or roadish:
             return None
