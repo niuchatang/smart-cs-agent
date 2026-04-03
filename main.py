@@ -28,10 +28,13 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
+from intent.user_intent_agent import UserIntentAgent
+
 IntentType = Literal[
     "route_planning",
     "realtime_status",
     "highway_condition",
+    "weather_query",
     "fare_policy",
     "ticket_refund",
     "lost_and_found",
@@ -456,6 +459,7 @@ class CustomerServiceAgent:
         self.rag_store = SimpleRAGStore(Path(__file__).parent / "data" / "knowledge_base.json")
         self.llm = self._build_llm()
         self.answer_chain = self._build_answer_chain()
+        self.intent_agent = UserIntentAgent(self)
 
     @staticmethod
     def _resolve_api_key() -> str:
@@ -502,7 +506,7 @@ class CustomerServiceAgent:
 
     def chat(self, message: str, history: List[Dict[str, Any]] | None = None) -> ChatResponse:
         rag_hits = self.rag_store.retrieve(message, k=3)
-        plan = self._plan(message, history or [], rag_hits)
+        plan = self.intent_agent.parse(message, history or [], rag_hits)
         tool_results = self._execute_actions(plan["actions"])
         if plan.get("od_traffic_followup"):
             tool_results = self._append_highway_queries_for_od_route(tool_results)
@@ -562,6 +566,28 @@ class CustomerServiceAgent:
     ) -> List[Dict[str, str]]:
         route = next((x for x in tool_results if x.get("tool") == "query_route_plan" and x.get("success")), None)
         hw = next((x for x in tool_results if x.get("tool") == "query_highway_condition" and x.get("success")), None)
+        wx_last = next(
+            (x for x in reversed(tool_results) if isinstance(x, dict) and x.get("tool") == "query_weather" and x.get("success")),
+            None,
+        )
+        if isinstance(wx_last, dict):
+            pend = wx_last.get("along_route_pending")
+            if isinstance(pend, dict) and pend.get("next_city") and pend.get("next_index") is not None:
+                nc = str(pend["next_city"]).strip()
+                return [
+                    {
+                        "question": f"继续查询下一途经城市（{nc}）的天气？"[:200],
+                        "answer": "点击后查询路线下一站的天气（依次进行）。",
+                    },
+                    {
+                        "question": "从成都到重庆怎么走？",
+                        "answer": "点击后发起驾车路径规划（可将城市换成你的起终点）。",
+                    },
+                    {
+                        "question": "G2京沪高速现在好走吗？",
+                        "answer": "点击后查询 G2 拥堵、事故与管制摘要。",
+                    },
+                ]
         if intent == "route_planning" and isinstance(route, dict):
             o, d = str(route.get("origin", "")).strip(), str(route.get("destination", "")).strip()
             via = route.get("waypoints")
@@ -572,16 +598,13 @@ class CustomerServiceAgent:
             hw_list = route.get("highways") if isinstance(route.get("highways"), list) else []
             hw0 = str(hw_list[0]).strip() if hw_list else ""
             q_hw = (hw0 + "现在好走吗？") if hw0 and len(hw0) <= 18 else "G2京沪高速现在好走吗？"
-            q_again = f"从{o}到{d}开车要多久？" if o and d else "从南京到上海开车要多久？"
+            weather_item = self._weather_followup_from_route(route)
             return [
                 {
                     "question": f"{o}到{d}{leg_hint}沿途高速路况怎么样？" if o and d else "这条路线沿途高速路况怎么样？",
                     "answer": "点击后会再识别起终点并查询沿途高速路况（地点需能解析）。也可直接发「G40 路况」。",
                 },
-                {
-                    "question": q_again,
-                    "answer": "点击后再次发起驾车路径规划，回复含里程、耗时、途经高速与行程提示。",
-                },
+                weather_item,
                 {
                     "question": q_hw,
                     "answer": "点击后按高速路况工具查询拥堵、事故与管制摘要。",
@@ -590,7 +613,7 @@ class CustomerServiceAgent:
         if intent in {"highway_condition", "realtime_status"} and isinstance(hw, dict):
             code = str(hw.get("code") or "").strip()
             other = "G15沈海高速现在好走吗？" if code.upper() != "G15" else "G2京沪高速现在好走吗？"
-            return [
+            items = [
                 {
                     "question": other,
                     "answer": "点击后查询另一条示例高速的路况摘要，便于对比走廊。",
@@ -604,6 +627,10 @@ class CustomerServiceAgent:
                     "answer": f"点击后再次查询{'该高速' if code else 'G2'}路况摘要。",
                 },
             ]
+            if isinstance(route, dict) and route.get("success"):
+                w_item = self._weather_followup_from_route(route)
+                items = [w_item, items[0], items[2]]
+            return items
         if intent in {"fare_policy", "ticket_refund"}:
             return [
                 {
@@ -648,419 +675,6 @@ class CustomerServiceAgent:
                 "answer": "点击后查询内置示例：地铁2号线运行状态（其他线路需你输入全名尝试）。",
             },
         ]
-
-    def _plan(self, message: str, history: List[Dict[str, Any]], rag_hits: List[Dict[str, Any]]) -> Dict[str, Any]:
-        llm_attempted = False
-        if self.llm_enabled:
-            try:
-                llm_attempted = True
-                llm_plan = self._plan_by_llm(message, history, rag_hits)
-                llm_plan = self._post_process_llm_plan(llm_plan, message, history)
-                if self._is_usable_plan(llm_plan):
-                    return llm_plan
-            except Exception:
-                pass
-
-        # Fallback path when LLM unavailable / response malformed.
-        rule_plan = self._plan_by_rules(message, history)
-        if not self.llm_enabled:
-            return rule_plan
-        if llm_attempted:
-            rule_plan["used_llm"] = True
-        return rule_plan
-
-    @staticmethod
-    def _should_prefer_llm(message: str, history: List[Dict[str, Any]]) -> bool:
-        if not history:
-            return False
-        text = message.strip()
-        if not text:
-            return False
-        # 短追问通常依赖上下文（例如“路况怎么样/这段呢”），优先让 LLM 做意图和动作判断。
-        if len(text) <= 12 and any(k in text for k in ["怎么样", "如何", "咋样", "这中间", "这段", "这条", "路况"]):
-            return True
-        return False
-
-    def _plan_by_llm(self, message: str, history: List[Dict[str, Any]], rag_hits: List[Dict[str, Any]]) -> Dict[str, Any]:
-        history_text = self._history_to_text(history)
-        rag_text = self._rag_to_text(rag_hits)
-        recent_route_context = self._extract_recent_route_context(history)
-        if self.llm is None:
-            return self._plan_by_rules(message, history)
-        planner_prompt = ChatPromptTemplate.from_template(
-            """
-你是智慧交通客服智能体，请把用户消息识别为意图并给出工具动作计划。
-仅输出 JSON，格式如下：
-{{
-  "intent": "route_planning|realtime_status|highway_condition|fare_policy|ticket_refund|lost_and_found|complaint|human_handoff|unknown",
-  "confidence": 0.0,
-  "actions": [{{"tool":"query_transit_status|query_highway_condition|calculate_fare|create_transport_ticket|handoff_to_human","params":{{}}}}],
-  "llm_reply": "string"
-}}
-
-规则：
-1) 查询地铁/公交实时状态优先调用 query_transit_status。
-2) 查询高速或道路事故/管制/拥堵/路况优先调用 query_highway_condition。
-3) 票价咨询可调用 calculate_fare。
-4) 退票、失物招领、投诉应调用 create_transport_ticket。
-4) 明确要求人工时调用 handoff_to_human。
-5) confidence 在 [0,1]。
-6) 对“这中间路况/这段路况/路况怎么样/有交通事故吗”这类追问，若未明确给出高速编号，请结合“最近一次路径规划上下文”里的途经高速，生成多个 query_highway_condition 动作，逐条查询并返回。
-
-最近对话上下文：
-{history_text}
-
-最近一次路径规划上下文（结构化）：
-{recent_route_context}
-
-检索到的知识库片段（RAG）：
-{rag_text}
-
-用户消息：{message}
-""".strip()
-        )
-        chain = planner_prompt | self.llm | StrOutputParser()
-        text = chain.invoke(
-            {
-                "history_text": history_text,
-                "recent_route_context": recent_route_context,
-                "rag_text": rag_text,
-                "message": message,
-            }
-        ).strip()
-        parsed = self._parse_llm_plan_json(text)
-        return {
-            "intent": parsed.get("intent", "unknown"),
-            "confidence": float(parsed.get("confidence", 0.6)),
-            "actions": parsed.get("actions", []),
-            "llm_reply": parsed.get("llm_reply", ""),
-            "used_llm": True,
-        }
-
-    @staticmethod
-    def _parse_llm_plan_json(text: str) -> Dict[str, Any]:
-        raw = text.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`").strip()
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-        # DeepSeek occasionally returns prose + JSON; extract the first JSON object.
-        m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if m:
-            block = m.group(0)
-            try:
-                parsed = json.loads(block)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-        raise ValueError("llm output is not valid planning json")
-
-    def _post_process_llm_plan(
-        self, llm_plan: Dict[str, Any], message: str, history: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        plan = dict(llm_plan)
-        plan["actions"] = list(plan.get("actions", [])) if isinstance(plan.get("actions"), list) else []
-        intent = str(plan.get("intent", "unknown"))
-        road_query = any(k in message for k in ["高速", "事故", "管制", "封闭", "拥堵", "路况"])
-        transit_query = any(k in message for k in ["地铁", "公交", "班次", "首班", "末班", "延误"])
-
-        if road_query and not transit_query and intent == "realtime_status":
-            intent = "highway_condition"
-            plan["intent"] = intent
-            plan["confidence"] = max(float(plan.get("confidence", 0.0)), 0.75)
-
-        explicit_target = self._extract_highway_target(message)
-        if explicit_target:
-            intent = "highway_condition"
-            plan["intent"] = intent
-            plan["confidence"] = max(float(plan.get("confidence", 0.0)), 0.9)
-
-        multi_od = self._extract_multi_stop_places(message)
-        if multi_od and len(multi_od) >= 3:
-            origin_od, dest_od = multi_od[0], multi_od[-1]
-        else:
-            origin_od, dest_od = self._extract_route_endpoints(message)
-        if (
-            road_query
-            and not transit_query
-            and origin_od
-            and dest_od
-            and not explicit_target
-        ):
-            intent = "highway_condition"
-            plan["intent"] = "highway_condition"
-            plan["confidence"] = max(float(plan.get("confidence", 0.0)), 0.88)
-            plan["od_traffic_followup"] = True
-            rp_od: Dict[str, Any] = {"origin": origin_od, "destination": dest_od, "mode": "driving"}
-            if multi_od and len(multi_od) >= 3:
-                rp_od["waypoints"] = multi_od[1:-1]
-            plan["actions"] = [{"tool": "query_route_plan", "params": rp_od}]
-
-        if intent == "unknown" and self._is_affirmative_message(message):
-            recent_codes = self._extract_last_highway_codes_from_history(history)
-            if recent_codes:
-                plan["intent"] = "highway_condition"
-                plan["confidence"] = max(float(plan.get("confidence", 0.0)), 0.82)
-                if len(recent_codes) > 1:
-                    plan["actions"] = []
-                    plan["llm_reply"] = (
-                        f"可以。你上一条涉及多条高速：{', '.join(recent_codes[:4])}。"
-                        "请告诉我你想展开哪一条（例如：查看G30详情）。"
-                    )
-                else:
-                    plan["actions"] = [{"tool": "query_highway_condition", "params": {"target": recent_codes[0]}}]
-
-        if intent == "route_planning" and not plan["actions"]:
-            multi_rp = self._extract_multi_stop_places(message)
-            if multi_rp and len(multi_rp) >= 3:
-                plan["actions"] = [
-                    {
-                        "tool": "query_route_plan",
-                        "params": {
-                            "origin": multi_rp[0],
-                            "destination": multi_rp[-1],
-                            "waypoints": multi_rp[1:-1],
-                            "mode": "driving",
-                        },
-                    }
-                ]
-            else:
-                origin, destination = self._extract_route_endpoints(message)
-                if origin and destination:
-                    plan["actions"] = [
-                        {
-                            "tool": "query_route_plan",
-                            "params": {"origin": origin, "destination": destination, "mode": "driving"},
-                        }
-                    ]
-
-        if intent == "highway_condition" and not plan.get("od_traffic_followup"):
-            fallback_target = explicit_target or self._extract_last_highway_from_history(history)
-            route_highways = self._extract_last_route_highways_from_history(history)
-            route_points = self._extract_last_route_probe_points_from_history(history)
-            normalized_actions: List[Dict[str, Any]] = []
-            for action in plan["actions"]:
-                if not isinstance(action, dict):
-                    continue
-                tool = str(action.get("tool", ""))
-                params = action.get("params", {})
-                if not isinstance(params, dict):
-                    params = {}
-                if tool == "query_highway_condition":
-                    target = str(params.get("target", "")).strip() or fallback_target
-                    if target:
-                        out_params: Dict[str, Any] = {"target": target}
-                        if isinstance(params.get("context_points"), list):
-                            out_params["context_points"] = params.get("context_points")
-                        elif isinstance(params.get("context_point"), dict):
-                            out_params["context_points"] = [params.get("context_point")]
-                        elif route_points:
-                            out_params["context_points"] = route_points
-                        normalized_actions.append({"tool": "query_highway_condition", "params": out_params})
-                else:
-                    normalized_actions.append({"tool": tool, "params": params})
-            if not explicit_target and route_highways:
-                normalized_actions = []
-                for hw in route_highways[:4]:
-                    out_params = {"target": hw}
-                    if route_points:
-                        out_params["context_points"] = route_points
-                    normalized_actions.append({"tool": "query_highway_condition", "params": out_params})
-            elif not normalized_actions:
-                if fallback_target:
-                    out_params = {"target": fallback_target}
-                    if route_points:
-                        out_params["context_points"] = route_points
-                    normalized_actions.append({"tool": "query_highway_condition", "params": out_params})
-                elif route_highways:
-                    for hw in route_highways[:4]:
-                        out_params = {"target": hw}
-                        if route_points:
-                            out_params["context_points"] = route_points
-                        normalized_actions.append({"tool": "query_highway_condition", "params": out_params})
-            plan["actions"] = normalized_actions
-
-        return plan
-
-    @staticmethod
-    def _is_usable_plan(plan: Dict[str, Any]) -> bool:
-        intent = str(plan.get("intent", "")).strip()
-        actions = plan.get("actions", [])
-        if intent in {
-            "route_planning",
-            "realtime_status",
-            "highway_condition",
-            "fare_policy",
-            "ticket_refund",
-            "lost_and_found",
-            "complaint",
-            "human_handoff",
-            "unknown",
-        }:
-            return isinstance(actions, list)
-        return False
-
-    def _plan_by_rules(self, message: str, history: List[Dict[str, Any]]) -> Dict[str, Any]:
-        text = message.lower()
-        target = self._extract_transit_target(message) or self._extract_last_target_from_history(history)
-        explicit_highway_target = self._extract_highway_target(message)
-        history_highway_target = self._extract_last_highway_from_history(history)
-        route_highways = self._extract_last_route_highways_from_history(history)
-        route_points = self._extract_last_route_probe_points_from_history(history)
-        recent_highway_codes = self._extract_last_highway_codes_from_history(history)
-
-        # Single highway code/name like "G1" should directly trigger condition query.
-        if explicit_highway_target:
-            direct_highway_params: Dict[str, Any] = {"target": explicit_highway_target}
-            if route_points:
-                direct_highway_params["context_points"] = route_points
-            return {
-                "intent": "highway_condition",
-                "confidence": 0.92,
-                "actions": [{"tool": "query_highway_condition", "params": direct_highway_params}],
-                "used_llm": False,
-            }
-
-        if self._is_affirmative_message(message) and recent_highway_codes:
-            if len(recent_highway_codes) > 1:
-                return {
-                    "intent": "highway_condition",
-                    "confidence": 0.88,
-                    "actions": [],
-                    "llm_reply": (
-                        f"可以。你上一条涉及多条高速：{', '.join(recent_highway_codes[:4])}。"
-                        "请告诉我要展开哪一条（例如：查看G30详情）。"
-                    ),
-                    "used_llm": False,
-                }
-            highway_params: Dict[str, Any] = {"target": recent_highway_codes[0]}
-            if route_points:
-                highway_params["context_points"] = route_points
-            return {
-                "intent": "highway_condition",
-                "confidence": 0.9,
-                "actions": [{"tool": "query_highway_condition", "params": highway_params}],
-                "used_llm": False,
-            }
-        multi = self._extract_multi_stop_places(message)
-        if multi and len(multi) >= 3:
-            origin, destination = multi[0], multi[-1]
-        else:
-            origin, destination = self._extract_route_endpoints(message)
-        road_query = any(k in text for k in ["高速", "事故", "管制", "封闭", "拥堵", "路况"])
-        # 「A到B路况」先算走廊再查途经高速，避免误判为纯路线规划。
-        if road_query and origin and destination:
-            rp1: Dict[str, Any] = {"origin": origin, "destination": destination, "mode": "driving"}
-            if multi and len(multi) >= 3:
-                rp1["waypoints"] = multi[1:-1]
-            return {
-                "intent": "highway_condition",
-                "confidence": 0.91,
-                "actions": [{"tool": "query_route_plan", "params": rp1}],
-                "od_traffic_followup": True,
-                "used_llm": False,
-            }
-        # "北京到南京" 这种只给起终点的表达也应识别为路径规划，不依赖"怎么走/路线"关键词。
-        has_route_keywords = any(k in text for k in ["怎么走", "路线", "换乘", "导航", "到达", "到...怎么去", "出行方案"])
-        if (origin and destination) or has_route_keywords:
-            actions: List[Dict[str, Any]] = []
-            if origin and destination:
-                rp2: Dict[str, Any] = {"origin": origin, "destination": destination, "mode": "driving"}
-                if multi and len(multi) >= 3:
-                    rp2["waypoints"] = multi[1:-1]
-                actions.append({"tool": "query_route_plan", "params": rp2})
-            return {
-                "intent": "route_planning",
-                "confidence": 0.9 if origin and destination else 0.84,
-                "actions": actions,
-                "used_llm": False,
-            }
-        if road_query and explicit_highway_target:
-            params: Dict[str, Any] = {"target": explicit_highway_target}
-            if route_points:
-                params["context_points"] = route_points
-            return {
-                "intent": "highway_condition",
-                "confidence": 0.91,
-                "actions": [{"tool": "query_highway_condition", "params": params}],
-                "used_llm": False,
-            }
-        if road_query and route_highways:
-            highway_actions: List[Dict[str, Any]] = []
-            for hw in route_highways[:4]:
-                params = {"target": hw}
-                if route_points:
-                    params["context_points"] = route_points
-                highway_actions.append({"tool": "query_highway_condition", "params": params})
-            return {
-                "intent": "highway_condition",
-                "confidence": 0.9,
-                "actions": highway_actions,
-                "used_llm": False,
-            }
-        if road_query and history_highway_target:
-            params = {"target": history_highway_target}
-            if route_points:
-                params["context_points"] = route_points
-            return {
-                "intent": "highway_condition",
-                "confidence": 0.86,
-                "actions": [{"tool": "query_highway_condition", "params": params}],
-                "used_llm": False,
-            }
-        if road_query:
-            # 对“这中间的路况”之类未显式给出编号的表达，仍保持在高速路况意图，避免误判到地铁实时状态。
-            return {
-                "intent": "highway_condition",
-                "confidence": 0.78,
-                "actions": [],
-                "used_llm": False,
-            }
-        if any(k in text for k in ["地铁", "公交", "路况", "拥堵", "延误", "班次", "首班", "末班", "实时"]):
-            return {
-                "intent": "realtime_status",
-                "confidence": 0.9,
-                "actions": [{"tool": "query_transit_status", "params": {"target": target}}],
-                "used_llm": False,
-            }
-        if any(k in text for k in ["票价", "多少钱", "收费", "换乘优惠", "学生卡", "次卡", "月票"]):
-            return {"intent": "fare_policy", "confidence": 0.86, "actions": [], "used_llm": False}
-        if any(k in text for k in ["退票", "退款", "改签", "取消行程"]):
-            return {
-                "intent": "ticket_refund",
-                "confidence": 0.9,
-                "actions": [{"tool": "create_transport_ticket", "params": {"issue_type": "ticket_refund", "detail": message}}],
-                "used_llm": False,
-            }
-        if any(k in text for k in ["失物", "遗失", "丢了", "招领", "找回"]):
-            return {
-                "intent": "lost_and_found",
-                "confidence": 0.9,
-                "actions": [{"tool": "create_transport_ticket", "params": {"issue_type": "lost_and_found", "detail": message}}],
-                "used_llm": False,
-            }
-        if any(k in text for k in ["人工", "投诉", "态度差", "生气", "服务差"]):
-            return {
-                "intent": "complaint" if "投诉" in text else "human_handoff",
-                "confidence": 0.92,
-                "actions": [{"tool": "create_transport_ticket", "params": {"issue_type": "complaint", "detail": message}}],
-                "used_llm": False,
-            }
-        if any(k in text for k in ["转人工", "人工客服", "客服介入"]):
-            return {
-                "intent": "human_handoff",
-                "confidence": 0.95,
-                "actions": [{"tool": "handoff_to_human", "params": {"priority": "high"}}],
-                "used_llm": False,
-            }
-        return {"intent": "unknown", "confidence": 0.45, "actions": [], "used_llm": False}
 
     def _execute_actions(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
@@ -1111,9 +725,46 @@ class CustomerServiceAgent:
                 results.append(self._create_transport_ticket(params.get("issue_type", "general"), params.get("detail", "")))
             elif tool == "handoff_to_human":
                 results.append(self._handoff_to_human(params.get("priority", "normal")))
+            elif tool == "query_weather":
+                raw_cities = params.get("cities")
+                cities_list: List[str] = [str(x).strip() for x in raw_cities] if isinstance(raw_cities, list) else []
+                arq = params.get("along_route_queue")
+                ari = params.get("along_route_index")
+                results.append(
+                    self._query_weather(
+                        cities_list,
+                        along_route_queue=arq if isinstance(arq, list) else None,
+                        along_route_index=ari,
+                    )
+                )
             else:
                 results.append({"tool": tool, "success": False, "error": f"unknown tool: {tool}"})
         return results
+
+    @staticmethod
+    def _route_city_sequence(route: Dict[str, Any]) -> List[str]:
+        car = route.get("cities_along_route")
+        if isinstance(car, list) and len(car) >= 2:
+            seq = [str(x).strip() for x in car if str(x).strip()]
+            if len(seq) >= 2:
+                return seq
+        o = str(route.get("origin", "")).strip()
+        d = str(route.get("destination", "")).strip()
+        via = route.get("waypoints")
+        via_list = [str(x).strip() for x in via] if isinstance(via, list) else []
+        out: List[str] = []
+        seen: set[str] = set()
+        for x in [o] + via_list + [d]:
+            if x and x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    def _weather_followup_from_route(self, route: Dict[str, Any]) -> Dict[str, str]:
+        return {
+            "question": "查询途经城市天气",
+            "answer": "点击后助手会先列出路线途经城市，并询问您要查哪一座；回复城市名后再查天气。也可回复「沿途」从第一站起逐站查询。",
+        }
 
     def _append_highway_queries_for_od_route(self, tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """After query_route_plan for OD+路况, query each corridor highway with route probe points."""
@@ -1181,6 +832,104 @@ class CustomerServiceAgent:
     ) -> str:
         if llm_reply.strip():
             return llm_reply.strip()
+        if intent == "weather_query":
+            w = next((x for x in tool_results if x.get("tool") == "query_weather"), None)
+            if isinstance(w, dict) and w.get("success"):
+                lines: List[str] = []
+                if w.get("along_route_mode"):
+                    pend_raw = w.get("along_route_pending")
+                    pend = cast(Dict[str, Any], pend_raw) if isinstance(pend_raw, dict) else {}
+                    tot = int(pend.get("total_stops", 0) or 0)
+                    cur = int(pend.get("current_stop", 0) or 0)
+                    c0 = str((w.get("cities") or ["未知"])[0])
+                    if tot > 0 and cur > 0:
+                        lines.append(f"途经天气（第 {cur}/{tot} 站：{c0}）")
+                    else:
+                        lines.append(f"途经天气：{c0}")
+                    if pend.get("complete"):
+                        lines.append("本条路线途经城市已依次查完。")
+                else:
+                    lines.append("已查询以下城市天气摘要：")
+                for block in w.get("forecasts", []) if isinstance(w.get("forecasts"), list) else []:
+                    if not isinstance(block, dict) or not block.get("ok"):
+                        err = str(block.get("error", "暂无数据") if isinstance(block, dict) else "暂无数据")
+                        cname = str(block.get("city", "") if isinstance(block, dict) else "")
+                        lines.append(f"- {cname or '某城市'}：{err}")
+                        continue
+                    cname = str(block.get("city", "")).strip()
+                    src = str(block.get("source", ""))
+                    if src == "amap_weather":
+                        live_raw = block.get("live")
+                        live = cast(Dict[str, Any], live_raw) if isinstance(live_raw, dict) else {}
+                        weather = str(live.get("weather", "")).strip()
+                        temp = str(live.get("temperature", "")).strip()
+                        wind = str(live.get("winddirection", "")).strip() + str(live.get("windpower", "")).strip()
+                        hum = str(live.get("humidity", "")).strip()
+                        live_bits: List[str] = []
+                        if temp:
+                            live_bits.append(f"气温{temp}℃")
+                        if weather:
+                            live_bits.append(weather)
+                        if hum:
+                            live_bits.append(f"湿度{hum}%")
+                        if wind:
+                            live_bits.append(wind)
+                        cast0_raw = block.get("cast0")
+                        cast0 = cast(Dict[str, Any], cast0_raw) if isinstance(cast0_raw, dict) else {}
+                        fc_line = ""
+                        if cast0:
+                            dayw = str(cast0.get("dayweather", "")).strip()
+                            nt = str(cast0.get("nighttemp", "")).strip()
+                            dt = str(cast0.get("daytemp", "")).strip()
+                            if dayw or nt or dt:
+                                fc_line = f"明日预报 {dayw or '—'} {nt}～{dt}℃".replace("～℃", "℃")
+                        segm: List[str] = []
+                        if live_bits:
+                            segm.append("，".join(live_bits))
+                        if fc_line:
+                            segm.append(fc_line)
+                        extra = "；".join(segm) if segm else "详见气象服务"
+                        lines.append(f"- {cname}：{extra}（高德天气）")
+                    else:
+                        cur_raw = block.get("current")
+                        cur = cast(Dict[str, Any], cur_raw) if isinstance(cur_raw, dict) else {}
+                        t2 = cur.get("temperature_2m")
+                        desc = str(block.get("weather_desc", "")).strip()
+                        tline = f"当前约 {t2}℃" if t2 is not None else ""
+                        lines.append(f"- {cname}：{desc or '天气'}{('，' + tline) if tline else ''}（Open-Meteo）")
+                ok_forecasts = [
+                    b
+                    for b in (w.get("forecasts") or [])
+                    if isinstance(b, dict) and b.get("ok")
+                ]
+                if ok_forecasts:
+                    if len(ok_forecasts) == 1:
+                        t_eff, wb = CustomerServiceAgent._weather_block_effective_temp_and_desc(ok_forecasts[0])
+                        hint = CustomerServiceAgent._outfit_recommend_cn(t_eff, wb)
+                        lines.append(f"衣着建议：{hint}")
+                    else:
+                        lines.append("衣着建议：")
+                        for b in ok_forecasts:
+                            cn = str(b.get("city", "")).strip() or "当地"
+                            t_eff, wb = CustomerServiceAgent._weather_block_effective_temp_and_desc(b)
+                            hint = CustomerServiceAgent._outfit_recommend_cn(t_eff, wb)
+                            lines.append(f"- {cn}：{hint}")
+                pend2_raw = w.get("along_route_pending")
+                pend2 = cast(Dict[str, Any], pend2_raw) if isinstance(pend2_raw, dict) else {}
+                if w.get("along_route_mode") and pend2.get("next_city") and not pend2.get("complete"):
+                    lines.append(
+                        "要继续查询下一站，请点击下方「继续查询下一途经城市」追问，或发送「继续查询下一途经城市天气」。"
+                    )
+                    lines.append(
+                        "若想一次查询多个城市，可直接回复城市名并用顿号或逗号分隔（例如「南通、苏州、连云港」），将合并为本轮天气摘要。"
+                    )
+                lines.append("长途出行请结合沿途实时预警与导航提示。")
+                return "\n".join(lines).strip()
+            err = str(w.get("error", "查询失败") if isinstance(w, dict) else "查询失败")
+            return (
+                f"暂时查不到天气数据。\n{err}\n"
+                "可尝试写清城市名（如「上海天气」），或先规划路线再点「你可能还想问」里的天气追问。"
+            )
         if intent == "route_planning":
             if tool_results and tool_results[0].get("success"):
                 d = tool_results[0]
@@ -1394,6 +1143,350 @@ class CustomerServiceAgent:
             f"我收到了你的问题：{message[:40]}。\n"
             "你可以再补充一下线路、站点、出发时间或目的地，我就能给你更准确的建议。"
         )
+
+    @staticmethod
+    def _wmo_weather_desc(code: int) -> str:
+        m = {
+            0: "晴",
+            1: "晴",
+            2: "多云",
+            3: "阴",
+            45: "雾",
+            48: "雾",
+            51: "小毛毛雨",
+            53: "毛毛雨",
+            55: "强毛毛雨",
+            61: "小雨",
+            63: "中雨",
+            65: "大雨",
+            71: "小雪",
+            73: "中雪",
+            75: "大雪",
+            80: "阵雨",
+            81: "阵雨",
+            82: "暴雨",
+            95: "雷雨",
+            96: "雷雨",
+            99: "雷雨",
+        }
+        return m.get(int(code), f"天气代码{code}")
+
+    @staticmethod
+    def _weather_block_effective_temp_and_desc(block: Dict[str, Any]) -> tuple[float | None, str]:
+        """从单城天气结果块提取用于穿搭建议的代表气温与天气描述文本。"""
+        if not isinstance(block, dict) or not block.get("ok"):
+            return None, ""
+        src = str(block.get("source", ""))
+        desc_parts: List[str] = []
+        eff: float | None = None
+        if src == "amap_weather":
+            live_raw = block.get("live")
+            cast0_raw = block.get("cast0")
+            live: Dict[str, Any] = live_raw if isinstance(live_raw, dict) else {}
+            cast0: Dict[str, Any] = cast0_raw if isinstance(cast0_raw, dict) else {}
+            wt = str(live.get("weather", "")).strip()
+            if wt:
+                desc_parts.append(wt)
+            dw = str(cast0.get("dayweather", "")).strip()
+            if dw:
+                desc_parts.append(dw)
+            ts = str(live.get("temperature", "")).strip()
+            if ts:
+                try:
+                    eff = float(ts)
+                except ValueError:
+                    pass
+            if eff is None:
+                nums: List[float] = []
+                for key in ("daytemp", "nighttemp"):
+                    x = str(cast0.get(key, "")).strip()
+                    if not x:
+                        continue
+                    try:
+                        nums.append(float(x))
+                    except ValueError:
+                        pass
+                if nums:
+                    eff = sum(nums) / len(nums)
+        else:
+            cur_raw = block.get("current")
+            cur: Dict[str, Any] = cur_raw if isinstance(cur_raw, dict) else {}
+            t2 = cur.get("temperature_2m")
+            if t2 is not None:
+                try:
+                    eff = float(t2)
+                except (TypeError, ValueError):
+                    pass
+            d = str(block.get("weather_desc", "")).strip()
+            if d:
+                desc_parts.append(d)
+        return eff, " ".join(desc_parts)
+
+    @staticmethod
+    def _outfit_recommend_cn(temp_c: float | None, weather_blob: str) -> str:
+        """根据气温与天气描述生成简短中文衣着建议（规则模板，不调用模型）。"""
+        w = weather_blob or ""
+        has_rain = any(
+            k in w
+            for k in (
+                "雨",
+                "雪",
+                "雹",
+                "阵雪",
+                "阵雨",
+                "雷阵雨",
+                "毛毛雨",
+                "冻雨",
+                "小到中雨",
+                "中到大雨",
+            )
+        )
+        has_strong_wind = ("风" in w) and any(x in w for x in ("大", "强", "阵", "沙尘", "飓"))
+
+        if temp_c is None:
+            base = "请关注当地气温变化，适时增减衣物。"
+            if has_rain:
+                base += "有降水时建议携带雨具、穿防滑鞋。"
+            return base
+
+        parts: List[str] = []
+        if temp_c >= 30:
+            parts.append("天气炎热，宜轻薄透气的短袖、短裤或裙装，注意防晒与补水。")
+        elif temp_c >= 25:
+            parts.append("气温偏高，可选短袖或薄长袖，搭配防晒衣、遮阳帽更舒适。")
+        elif temp_c >= 18:
+            parts.append("体感较舒适，长袖或T恤外加薄外套即可，早晚偏凉可搭一件开衫。")
+        elif temp_c >= 10:
+            parts.append("天气偏凉，建议外套、卫衣或针织衫，注意腰腹与足部保暖。")
+        elif temp_c >= 0:
+            parts.append("气温较低，厚外套、棉衣或轻羽绒更合适，可备围巾、手套。")
+        else:
+            parts.append("天气严寒，建议羽绒服或厚棉衣分层穿着，戴帽围巾并做好防风。")
+
+        if has_rain:
+            parts.append("有雨雪时建议带折叠伞或雨衣，鞋子选防滑、易打理的款式。")
+        if has_strong_wind and temp_c < 22:
+            parts.append("风力较大时可加一件防风外套。")
+
+        return "".join(parts)
+
+    def _query_weather_amap(self, city: str) -> Dict[str, Any]:
+        if not self.amap_api_key:
+            return {"city": city, "ok": False, "error": "no amap key"}
+        try:
+            ad = self._amap_geocode_adcode(city) or city
+            url = "https://restapi.amap.com/v3/weather/weatherInfo"
+            params = {"key": self.amap_api_key, "city": ad, "extensions": "all"}
+            resp = self._http_get(url, params=params, timeout=12, bypass_proxy=self.amap_bypass_proxy)
+            resp.raise_for_status()
+            payload = resp.json()
+            if str(payload.get("status", "0")) != "1":
+                return {
+                    "city": city,
+                    "ok": False,
+                    "error": str(payload.get("info", "amap weather failed")),
+                }
+            lives = payload.get("lives", [])
+            forecasts = payload.get("forecasts", [])
+            live: Dict[str, Any] = {}
+            if lives and isinstance(lives[0], dict):
+                live = dict(lives[0])
+            cast0: Dict[str, Any] = {}
+            if forecasts and isinstance(forecasts[0], dict):
+                casts = forecasts[0].get("casts", [])
+                if isinstance(casts, list) and casts and isinstance(casts[0], dict):
+                    cast0 = dict(casts[0])
+            return {"city": city, "ok": True, "source": "amap_weather", "live": live, "cast0": cast0}
+        except Exception as e:
+            return {"city": city, "ok": False, "error": str(e)}
+
+    def _query_weather_openmeteo(self, city: str, lat: float, lon: float) -> Dict[str, Any]:
+        try:
+            url = "https://api.open-meteo.com/v1/forecast"
+            params = {
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+                "timezone": "Asia/Shanghai",
+                "forecast_days": 2,
+            }
+            resp = requests.get(url, params=params, timeout=14)
+            resp.raise_for_status()
+            data = resp.json()
+            cur = data.get("current") if isinstance(data.get("current"), dict) else {}
+            wc = cur.get("weather_code")
+            desc = CustomerServiceAgent._wmo_weather_desc(int(wc)) if wc is not None else "天气"
+            return {"city": city, "ok": True, "source": "open_meteo", "current": cur, "weather_desc": desc}
+        except Exception as e:
+            return {"city": city, "ok": False, "error": str(e)}
+
+    def _query_weather_single_city(self, city: str) -> Dict[str, Any]:
+        if self.amap_api_key:
+            hit = self._query_weather_amap(city)
+            if hit.get("ok"):
+                return hit
+        geo = self._geocode_place(self._normalize_place_name(city)) or self._lookup_builtin_coord(city)
+        if not geo:
+            return {"city": city, "ok": False, "error": "无法解析城市位置"}
+        return self._query_weather_openmeteo(city, float(geo["lat"]), float(geo["lon"]))
+
+    def _query_weather(
+        self,
+        cities: List[str],
+        along_route_queue: List[Any] | None = None,
+        along_route_index: Any = None,
+    ) -> Dict[str, Any]:
+        if isinstance(along_route_queue, list) and along_route_queue:
+            try:
+                idx = int(along_route_index) if along_route_index is not None else 0
+            except (TypeError, ValueError):
+                idx = 0
+            cleaned_queue: List[str] = []
+            seen_q: set[str] = set()
+            for c in along_route_queue:
+                t = CustomerServiceAgent._clean_place(str(c).strip())
+                if t and t not in seen_q:
+                    seen_q.add(t)
+                    cleaned_queue.append(t)
+            if not cleaned_queue:
+                return {
+                    "tool": "query_weather",
+                    "success": False,
+                    "cities": [],
+                    "forecasts": [],
+                    "along_route_mode": True,
+                    "along_route_pending": None,
+                    "error": "路线城市列表为空",
+                }
+            if idx < 0 or idx >= len(cleaned_queue):
+                return {
+                    "tool": "query_weather",
+                    "success": False,
+                    "cities": [],
+                    "forecasts": [],
+                    "along_route_mode": True,
+                    "along_route_pending": None,
+                    "error": "途经天气序号无效",
+                }
+            target_city = cleaned_queue[idx]
+            forecasts = [self._query_weather_single_city(target_city)]
+            ok_any = any(bool(x.get("ok")) for x in forecasts)
+            if idx + 1 < len(cleaned_queue):
+                along_route_pending: Dict[str, Any] = {
+                    "queue": cleaned_queue,
+                    "next_index": idx + 1,
+                    "next_city": cleaned_queue[idx + 1],
+                    "total_stops": len(cleaned_queue),
+                    "current_stop": idx + 1,
+                }
+            else:
+                along_route_pending = {
+                    "complete": True,
+                    "queue": cleaned_queue,
+                    "total_stops": len(cleaned_queue),
+                    "current_stop": idx + 1,
+                }
+            return {
+                "tool": "query_weather",
+                "success": ok_any,
+                "cities": [target_city],
+                "forecasts": forecasts,
+                "along_route_mode": True,
+                "along_route_pending": along_route_pending,
+                "error": "" if ok_any else "未能获取天气数据",
+            }
+
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for c in cities:
+            t = CustomerServiceAgent._clean_place(str(c).strip())
+            if t and t not in seen:
+                seen.add(t)
+                cleaned.append(t)
+        if not cleaned:
+            return {
+                "tool": "query_weather",
+                "success": False,
+                "cities": [],
+                "forecasts": [],
+                "error": "请说明要查的城市，或先规划路线再点追问里的天气。",
+            }
+        forecasts = []
+        for city in cleaned[:10]:
+            forecasts.append(self._query_weather_single_city(city))
+        ok_any = any(bool(x.get("ok")) for x in forecasts)
+        return {
+            "tool": "query_weather",
+            "success": ok_any,
+            "cities": cleaned[:10],
+            "forecasts": forecasts,
+            "error": "" if ok_any else "未能获取天气数据",
+        }
+
+    @staticmethod
+    def parse_cities_from_weather_followup_question(message: str) -> List[str]:
+        """解析「你可能还想问」天气芯片发送的短句，得到城市列表；空列表表示需结合历史路线。"""
+        raw = (message or "").strip()
+        m = re.match(r"^查一下(.+?)的天气吗[？?]?\s*$", raw)
+        if not m:
+            return []
+        body = m.group(1).strip()
+        if "沿途城市" in body or "刚才路线" in body:
+            return []
+        parts = re.split(r"[、,，]", body)
+        return [p.strip() for p in parts if p.strip() and len(p.strip()) <= 24]
+
+    @staticmethod
+    def parse_weather_city_list_from_message(message: str) -> List[str]:
+        """
+        从「大同、忻州天气怎么样」等句解析多城：先去掉句末天气问法，再按顿号/逗号切分。
+        避免单城正则只匹配到「忻州」而漏掉「大同」。
+        """
+        raw = (message or "").strip()
+        if not raw:
+            return []
+        s = re.sub(
+            r"(?:的)?(?:天气|气温)(?:怎么样|如何|怎样|好吗|好么|呢)?\s*$",
+            "",
+            raw,
+        ).strip()
+        s = re.sub(r"\s*怎么样\s*$", "", s).strip()
+        s = re.sub(r"\s*如何\s*$", "", s).strip()
+        if not re.search(r"[、,，;；]", s):
+            return []
+        parts = re.split(r"[、,，;；]+", s)
+        skip = {
+            "天气",
+            "气温",
+            "查询",
+            "怎么样",
+            "如何",
+            "帮我",
+            "然后",
+            "还有",
+            "途径",
+            "途经",
+            "沿途",
+            "今天",
+            "现在",
+            "明日",
+            "这周",
+        }
+        out: List[str] = []
+        seen: set[str] = set()
+        for p in parts:
+            t = CustomerServiceAgent._clean_place(
+                CustomerServiceAgent._trim_route_context_suffix_from_place_token(p.strip())
+            )
+            if not t or t in skip:
+                continue
+            if len(t) < 2 or len(t) > 16:
+                continue
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out[:10]
 
     def _query_transit_status(self, target: str) -> Dict[str, Any]:
         if not target:
@@ -1761,7 +1854,110 @@ class CustomerServiceAgent:
             source=str(out.get("source") or ""),
             avoid_ferry=bool(out.get("avoid_ferry")),
         )
+        return self._attach_cities_along_route_to_result(out)
+
+    def _attach_cities_along_route_to_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """沿折线采样逆地理编码，得到途经城市（地级市/区县）名称，供途经天气等使用。"""
+        out = dict(result)
+        pts = out.get("route_points")
+        if not isinstance(pts, list) or len(pts) < 2:
+            return out
+        try:
+            cities = self._sample_cities_along_route_polyline(
+                pts,
+                str(out.get("origin", "")).strip(),
+                str(out.get("destination", "")).strip(),
+            )
+            if cities:
+                out["cities_along_route"] = cities
+        except Exception:
+            pass
         return out
+
+    def _city_labels_fuzzy_equal(self, a: str, b: str) -> bool:
+        ca = CustomerServiceAgent._clean_place(str(a or "").strip())
+        cb = CustomerServiceAgent._clean_place(str(b or "").strip())
+        if not ca or not cb:
+            return False
+        if ca == cb:
+            return True
+        if len(ca) >= 2 and (ca in cb or cb in ca):
+            return True
+        return False
+
+    def _sample_cities_along_route_polyline(
+        self,
+        route_points: List[List[float]],
+        origin_name: str,
+        dest_name: str,
+        max_geo_calls: int = 12,
+    ) -> List[str]:
+        if len(route_points) < 2:
+            return []
+        cum_km = CustomerServiceAgent._route_vertex_cumulative_km(route_points)
+        if not cum_km:
+            return []
+        total = float(cum_km[-1])
+        nvert = len(route_points)
+        if total < 5:
+            fracs = [0.0, 0.55, 1.0]
+        elif total < 45:
+            fracs = [0.0, 0.18, 0.38, 0.58, 0.78, 1.0]
+        elif total < 150:
+            fracs = [0.0, 0.1, 0.22, 0.38, 0.52, 0.65, 0.78, 0.9, 1.0]
+        else:
+            k = min(max_geo_calls, max(9, int(total / 60) + 6))
+            fracs = [i / max(1, k - 1) for i in range(k)] if k > 1 else [0.0, 1.0]
+
+        ordered_idx: List[int] = []
+        last_i = -1
+        for f in fracs:
+            target_km = total * float(f)
+            best_i = nvert - 1
+            for i, ck in enumerate(cum_km):
+                if float(ck) >= target_km:
+                    best_i = i
+                    break
+            if best_i == last_i:
+                continue
+            ordered_idx.append(best_i)
+            last_i = best_i
+
+        ordered_idx = ordered_idx[:max_geo_calls]
+        raw_names: List[str] = []
+        for idx_i, vi in enumerate(ordered_idx):
+            if idx_i > 0:
+                time.sleep(0.09 if self.amap_api_key else 0.35)
+            lat = float(route_points[vi][0])
+            lon = float(route_points[vi][1])
+            nm = self._reverse_geocode_short_name(lat, lon).strip()
+            if nm and len(nm) >= 2 and nm not in ("中国", "中华人民共和国"):
+                raw_names.append(CustomerServiceAgent._clean_place(nm))
+
+        dedup: List[str] = []
+        for nm in raw_names:
+            if dedup and self._city_labels_fuzzy_equal(dedup[-1], nm):
+                continue
+            dedup.append(nm)
+
+        o = CustomerServiceAgent._clean_place(str(origin_name).strip())
+        d = CustomerServiceAgent._clean_place(str(dest_name).strip())
+        if o and (not dedup or not self._city_labels_fuzzy_equal(o, dedup[0])):
+            dedup.insert(0, o)
+        if d and (not dedup or not self._city_labels_fuzzy_equal(d, dedup[-1])):
+            dedup.append(d)
+
+        out_names: List[str] = []
+        for x in dedup:
+            t = str(x).strip()
+            if not t:
+                continue
+            if out_names and self._city_labels_fuzzy_equal(out_names[-1], t):
+                continue
+            out_names.append(t)
+        if len(out_names) < 2 and o and d and o != d:
+            return [o, d]
+        return out_names
 
     def _query_route_plan(
         self,
@@ -2004,6 +2200,27 @@ class CustomerServiceAgent:
             return {"lat": float(lat_s), "lon": float(lon_s), "display_name": name}
         except Exception:
             return None
+
+    def _amap_geocode_adcode(self, name: str) -> str | None:
+        if not self.amap_api_key:
+            return None
+        try:
+            url = "https://restapi.amap.com/v3/geocode/geo"
+            params = {"key": self.amap_api_key, "address": name}
+            resp = self._http_get(url, params=params, timeout=10, bypass_proxy=self.amap_bypass_proxy)
+            resp.raise_for_status()
+            payload = resp.json()
+            if str(payload.get("status", "0")) != "1":
+                return None
+            geocodes = payload.get("geocodes", [])
+            if not isinstance(geocodes, list) or not geocodes:
+                return None
+            ad = geocodes[0].get("adcode") if isinstance(geocodes[0], dict) else None
+            if ad:
+                return str(ad).strip()
+        except Exception:
+            pass
+        return None
 
     def _query_route_plan_by_amap(
         self, origin: str, destination: str, a: Dict[str, Any], b: Dict[str, Any]
@@ -3197,9 +3414,13 @@ class CustomerServiceAgent:
         return None
 
     # 起终点正则用「非空白」连续匹配时，会把「贵阳沿途高速路况…」整段吃进终点，导致 geocode 失败；在路线/路况用语前截断。
+    # 含「的路段/拥堵」等，避免「北京到上海的路段拥堵吗」把终点吃成「上海的路段拥堵吗」导致 geocode 失败（意图识别往往是对的，坏在起终点抽取）。
     _ROUTE_CONTEXT_IN_PLACE_TOKEN = re.compile(
         r"(?:沿途|经停|路过|高速公路|高速路|高速|国道|省道|快速路|"
-        r"路况|交通情况|通行情况|交通状况|道路情况|怎么样|怎么走|怎么去|如何走|如何|导航|自驾|开车|驾车)"
+        r"的路段|路段|拥堵|堵不堵|塞车|通畅|顺畅|"
+        r"帮我|帮|选条|选一条|选一种|选个|最快的路|最快的|最快|"
+        r"推荐一下|推荐|规划一下|规划|路径|方案|走哪条|哪条快|"
+        r"路况|交通情况|通行情况|交通状况|道路情况|怎么样|怎么走|怎么去|如何走|如何|导航|自驾|开车|驾车|吗)"
     )
 
     @staticmethod
@@ -3271,6 +3492,8 @@ class CustomerServiceAgent:
             "西宁": "Xining, Qinghai, China",
             "拉萨": "Lhasa, Tibet, China",
             "呼和浩特": "Hohhot, Inner Mongolia, China",
+            "秦皇岛": "Qinhuangdao, Hebei, China",
+            "秦皇岛市": "Qinhuangdao, Hebei, China",
         }
         n = name.strip()
         return mapping.get(n, n)
@@ -3303,6 +3526,11 @@ class CustomerServiceAgent:
         # Remove common route-query suffixes.
         n = re.sub(r"(的路线|路线|怎么走|如何走|怎么去|出行方案)$", "", n)
         n = re.sub(r"(?:的路况|路况|交通情况|通行情况|交通状况|道路情况)$", "", n)
+        n = re.sub(r"(?:的路段|路段)(?:拥堵|通畅|堵不堵|怎么样|如何|吗)?$", "", n)
+        # 「秦皇岛帮我选条最快的路」类：截断正则未覆盖时的兜底
+        n = re.sub(r"(?:帮我|帮).*$", "", n)
+        n = re.sub(r"(?:选条|选一条|选一种).*$", "", n)
+        n = re.sub(r"(?:最快的路|最快路|最快的|最快)$", "", n)
         n = re.sub(r"^(去|到)", "", n)
         n = n.strip()
         return CustomerServiceAgent._expand_place_alias(n)
@@ -3379,6 +3607,8 @@ class CustomerServiceAgent:
             "拉萨": (29.6500, 91.1000),
             "呼和浩特市": (40.8414, 111.7519),
             "呼和浩特": (40.8414, 111.7519),
+            "秦皇岛": (39.9354, 119.6003),
+            "秦皇岛市": (39.9354, 119.6003),
         }
         n = name.strip()
         if n not in coords:
@@ -3899,12 +4129,34 @@ out center tags;
                             t = str(h.get("title", "")).strip()
                             if t:
                                 hint_titles.append(t)
+                car = tr.get("cities_along_route", [])
+                cities_line = ""
+                if isinstance(car, list) and car:
+                    cities_line = f"; cities_along_route={','.join(str(x).strip() for x in car if str(x).strip())}"
                 return (
                     f"origin={origin or 'unknown'}; destination={destination or 'unknown'}; "
                     f"highways={','.join(highways) if highways else 'none'}; "
                     f"trip_hints={','.join(hint_titles) if hint_titles else 'none'}"
+                    f"{cities_line}"
                 )
         return "none"
+
+    @staticmethod
+    def _extract_last_route_cities_from_history(history: List[Dict[str, Any]]) -> List[str]:
+        for item in reversed(history):
+            meta = item.get("meta", {}) if isinstance(item.get("meta"), dict) else {}
+            tool_results = meta.get("tool_results", [])
+            if not isinstance(tool_results, list):
+                continue
+            for tr in tool_results:
+                if not isinstance(tr, dict):
+                    continue
+                if tr.get("tool") != "query_route_plan" or not tr.get("success"):
+                    continue
+                seq = CustomerServiceAgent._route_city_sequence(tr)
+                if seq:
+                    return seq
+        return []
 
     @staticmethod
     def _history_to_text(history: List[Dict[str, Any]]) -> str:

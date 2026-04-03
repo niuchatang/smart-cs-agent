@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
+COPY intent ./intent
 COPY static ./static
 COPY data/knowledge_base.json ./.defaults/knowledge_base.json
 COPY --from=frontend-build /app/static-vue ./static-vue

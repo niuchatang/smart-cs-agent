@@ -11,7 +11,7 @@
 
 # 智慧交通客服智能体（Smart CS Agent）
 
-面向**高速公路 / 出行咨询**场景的对话式系统：对外表现为**智能客服**（多轮问答、业务引导），工程上实现为**工具型智能体**（意图识别 → 规划动作 → 调用 API / 本地工具 → 生成回复）。后端基于 **FastAPI + LangChain**；**对话模型使用 DeepSeek**（官方 OpenAI 兼容 `/v1` 接口）。实现上通过 LangChain 的 **`ChatOpenAI`** 客户端调用该协议——这是类名/包名（`langchain-openai`），**不表示调用 OpenAI 官方**。未配置 DeepSeek 时，仍可通过 `OPENAI_*` 环境变量接入其它 **同一协议** 的厂商作为备选。前端提供 **Vue 3（主）** 与 **纯静态 HTML（兜底）** 两套界面。
+面向**高速公路 / 出行咨询**场景的对话式系统：对外表现为**智能客服**（多轮问答、业务引导），工程上实现为 **编排式多智能体 + 工具型主智能体**——**主智能体** `CustomerServiceAgent`（`main.py`）负责检索上下文、执行工具与渲染回复；**意图侧**由多个**子智能体**分工协作（见下节「架构说明」），规则路径由 **`IntentOrchestratorAgent`** 统一调度，天气多轮由 **`WeatherDialogAgent`** 优先接管，复杂句可再经 **同一 LLM** 输出结构化计划。这与「多个大模型角色自主对话、互相指派任务」的典型多智能体演示不同，本项目子智能体以 **规则与状态机** 为主、**可选单一 LLM** 辅助规划。后端基于 **FastAPI + LangChain**；**意图规划主链路**用 **LangGraph**（`intent/intent_planning_graph.py`）编排「天气子智能体 → LLM → 规则中枢」状态图；**对话模型使用 DeepSeek**（官方 OpenAI 兼容 `/v1` 接口）。实现上通过 LangChain 的 **`ChatOpenAI`** 客户端调用该协议——这是类名/包名（`langchain-openai`），**不表示调用 OpenAI 官方**。未配置 DeepSeek 时，仍可通过 `OPENAI_*` 环境变量接入其它 **同一协议** 的厂商作为备选。前端提供 **Vue 3（主）** 与 **纯静态 HTML（兜底）** 两套界面。
 
 ## 使用声明
 
@@ -26,7 +26,8 @@
 | 维度 | 说明 |
 |------|------|
 | **业务** | 路径规划、路况/管制、票价规则、退改签、失物招领、投诉与转人工等交通客服常见诉求 |
-| **技术** | RAG（BM25）增强知识问答；规则引擎优先、按需调用 LLM；结构化工具返回供前端地图与卡片展示 |
+| **架构** | **编排式多智能体**：主智能体执行工具与话术；意图层含调度中枢与路况/路径/通用/天气等子智能体（见「架构说明」） |
+| **技术** | RAG（BM25）增强知识问答；**LangGraph** 编排意图工作流；规则引擎优先、按需调用 LLM；结构化工具返回供前端地图与卡片展示 |
 | **用户** | 需注册/登录（MySQL 存用户与会话）；`user_id` 区分同一账号下的不同对话线程 |
 
 ---
@@ -37,15 +38,16 @@
 
 - **多轮会话**：按用户与会话 ID 持久化到 `data/conversations.json`（与登录用户名组合作用域，避免串号）。
 - **RAG**：从 `data/knowledge_base.json` 加载文档，使用 **LangChain BM25Retriever** 本地检索，低延迟。
-- **意图路由**：高置信度走规则短路；复杂或未覆盖场景在配置 LLM 时由模型输出 JSON 计划。
+- **意图路由（多智能体协作）**：`UserIntentAgent` 为意图总入口；内部通过 **LangGraph** 按序执行 **天气子智能体** →（未命中则）**LLM 结构化规划** →（仍未采用则）**规则编排**；**天气多轮**仍由 `WeatherDialogAgent` 在图首节点拦截；规则阶段由 **`IntentOrchestratorAgent`** 调度 **路况** `RoadConditionAgent`、**路径** `RoutePlanningAgent`、**通用** `GeneralIntentAgent`。各节点产出统一的 `intent + actions` 计划，由主智能体执行。
 - **追问建议**：回复可带 `follow_ups`，前端以「你可能还想问」芯片展示，点击即发送。
 
 ### 路径与路况（工具侧）
 
 - **驾车/出行路径**（`query_route_plan`）：支持「从 A 到 B」类说法；地理编码（如 Nominatim）+ 路线服务（**高德路径 API**（需 `AMAP_API_KEY`）、**OSRM 公共实例**、失败时本地估算等策略，以实际 `main.py` 为准）。
-- **结构化结果**：含里程、耗时、折线点、途经高速等信息；前端用 **Leaflet** 展示路线。
+- **结构化结果**：含里程、耗时、折线点、途经高速等信息；后端会沿折线**逆地理编码**生成 `cities_along_route`（推断途经城市序列），供「查询途经城市天气」等使用；前端用 **Leaflet** 展示路线。
 - **行程提示**（`trip_hints`）：由后端生成，与路径结果一并返回；前端在「路径规划」区展示卡片（非服务区 POI 推荐链路）。
 - **高速路况**（`query_highway_condition`）：与路线/路段探测结合时可在地图上叠加拥堵示意（具体字段以前端与工具返回为准）。
+- **天气**（`query_weather` + **天气对话智能体** `intent/weather_agent.py`）：有 `AMAP_API_KEY` 时优先高德天气，否则用 **Open-Meteo**。路径规划后的追问为肯定句 **「查询途经城市天气」**：点击后助手先**询问要查途经哪一座城市**，用户回复城市名后再查；也可回复 **「沿途」** 从第一站起逐站查，并用 **「继续查询下一途经城市（…）」** /「继续查询下一途经城市天气」/ 短「是」进下一站。实况缺失时仍展示明日预报。显式多城（如「上海、北京天气」）仍可一次查多城。成功出摘要后，回复中会附带基于气温与晴雨等的 **衣着建议**（规则模板，见上文「近期更新说明」）。
 
 ### 其他工具能力
 
@@ -68,6 +70,29 @@
 
 ---
 
+## 近期更新说明
+
+以下为实现层近期补充，便于对照代码与排查行为差异。
+
+### 意图层多智能体（`intent/`）
+
+- **LangGraph 意图工作流**（`intent/intent_planning_graph.py`）：将单轮规划写成 **weather / llm / rules / finalize** 节点，条件跳转与原先 `_plan` 一致；业务仍由各子智能体类实现，图只负责 **编排**。
+- **`IntentOrchestratorAgent`**（`intent/orchestrator_agent.py`）：**调度中枢**；在 **LLM 规划未采用或不可用** 时，由规则回落统一调用各 **子智能体**，**顺序与原先单文件内规则一致**：显式高速编号 → 通用天气规则 → 路况中段（肯定答复高速、起终点+路况）→ **纯路径规划** → 路况末段（历史路线高速、泛路况等）→ 通用尾部（公交实时、票价、工单、转人工等）。
+- **`RoadConditionAgent`**（`intent/road_condition_agent.py`）、**`RoutePlanningAgent`**（`intent/route_planning_agent.py`）、**`GeneralIntentAgent`**（`intent/general_intent_agent.py`）：路况 / 路径 / 通用 **子智能体**；**`UserIntentAgent._plan_by_rules`** 仅委托 **`orchestrator.plan_rules(...)`**。
+- **`WeatherDialogAgent`**：**天气子智能体**，在 **`UserIntentAgent._plan` 最前**执行（早于 LLM 与编排器规则），负责途经天气芯片、沿途逐站队列、短「是」衔接等；**不经过** `IntentOrchestratorAgent` 的规则链。
+
+### 天气问询纠偏
+
+- **无具体城市**（如「查询天气」「帮我查天气」）：避免正则把 **「查询」** 等当成城市名调用高德；由 **`WeatherDialogAgent`** 识别 **裸查天气短句** 并直接返回澄清话术（`WEATHER_CITY_CLARIFY_REPLY`），通用规则侧增加 **非城市词** 集合过滤，天气规则兜底也附带同一类澄清文案。
+- **「途径」与「途经」简写**：扩展与 **「查询途经城市天气」** 等价的 **短句芯片**（如「查询途径天气」）及去空白匹配；**「途径」** 纳入路线相关语境，**「途径天气」类** 在有路线城市时先 **追问查哪一城**（与芯片流程一致），避免误查虚构地名。
+
+### 天气回复中的衣着建议
+
+- 在 **`main.py`** 的 **`_render_reply`** 中，当 **`intent == weather_query`** 且 **`query_weather` 成功** 时，在「城市天气摘要」之后、「长途出行…」提示之前，追加 **「衣着建议」** 段落。
+- 实现为 **`CustomerServiceAgent._weather_block_effective_temp_and_desc`**（从高德实况/预报或 Open-Meteo 抽取代表气温与描述）与 **`_outfit_recommend_cn`**（按温区与晴雨/大风等关键词的 **规则模板**），**不额外调用大模型**，多城则按城市分条列出。
+
+---
+
 ## 意图类型（Intent）
 
 代码中与规划、回复逻辑一致的意图包括：
@@ -75,6 +100,7 @@
 - `route_planning` — 路线规划
 - `realtime_status` — 实时线路/班次类（与纯路况说法可能归并到高速路况意图）
 - `highway_condition` — 高速事故、管制、拥堵等
+- `weather_query` — 城市/沿途天气查询（`query_weather`）
 - `fare_policy` — 票价与优惠规则
 - `ticket_refund` — 退票/改签
 - `lost_and_found` — 失物招领
@@ -91,16 +117,20 @@
     ↓
 FastAPI（main.py）
     ├─ 鉴权（MySQL：用户、会话）
-    ├─ POST /chat → CustomerServiceAgent.chat()
+    ├─ POST /chat → CustomerServiceAgent（主智能体）.chat()
     │       ├─ 读历史（conversations.json）
     │       ├─ RAG 检索（BM25）
-    │       ├─ 规则 / LLM 规划 → actions[]
+    │       ├─ UserIntentAgent.parse() → LangGraph 意图状态图（intent/intent_planning_graph.py）
+    │       │       weather 节点：WeatherDialogAgent
+    │       │       → llm 节点：可选结构化规划
+    │       │       → rules 节点：IntentOrchestratorAgent → Road / Route / General
     │       ├─ 执行工具 → tool_results[]
     │       └─ 渲染 reply + follow_ups
     └─ 静态资源：/static-vue/ 或 static/
 ```
 
-- **单文件核心**：业务主体集中在 `main.py`（智能体、工具、路由、鉴权），便于演示与二次开发。
+- **编排式多智能体**：**主智能体** `CustomerServiceAgent` 持有对话闭环与工具执行；**意图层**在 `intent/` 内由 **`UserIntentAgent`** 调用 **LangGraph** 编译图（`compile_user_intent_planning_graph`），节点顺序为 **天气 → LLM → 规则编排**，与原先 `if/else` 逻辑等价；输出统一结构的计划后仍由主智能体执行（单进程、非分布式）。
+- **单文件核心**：路由、鉴权、工具实现与话术模板主体在 `main.py`；意图解析按上式拆分为多类 **Agent** 文件，便于维护与扩展。
 - **前端构建**：`frontend/` 为 Vite + Vue 3 源码，`npm run build` 输出到 `static-vue/`。
 
 ---
@@ -154,8 +184,8 @@ FastAPI（main.py）
 - **对话模型（DeepSeek + `langchain-openai` 包内的 `ChatOpenAI` 客户端）**  
   - **默认厂商为 DeepSeek**：环境变量 **`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL_ID`**（解析优先级与默认值见 `main.py` 中 `_resolve_*`）。  
   - **`ChatOpenAI`** 仅表示「OpenAI **兼容** HTTP API」的 LangChain 封装；**本项目主线不依赖 OpenAI 官方账号**。  
-  - 用于两类调用：**① 结构化动作规划（JSON）**；**② 在特定意图下基于 RAG 片段生成短回答**。  
-  - **文件**：`main.py` 中 `CustomerServiceAgent`（`_build_llm`、`_plan_by_llm`、`_build_answer_chain`、`_render_reply` 等）。  
+  - 用于两类调用：**① 用户意图解析（结构化 JSON 计划，见 `intent/user_intent_agent.py`）**；**② 在特定意图下基于 RAG 片段生成短回答**。  
+  - **文件**：`intent/user_intent_agent.py`（`UserIntentAgent.parse` → LLM/规则规划）；`main.py` 中 `CustomerServiceAgent`（`_build_llm`、`_build_answer_chain`、`_render_reply`、工具执行等）。  
   - **流程级说明**：见下文 **「大模型（LLM）工作流详解」**。
 - **`langchain-core`**  
   - `ChatPromptTemplate` 拼装系统/用户提示；`StrOutputParser` 取模型文本；`Document` 表示知识库条目（与 BM25 配合，**不经过向量 embedding 模型**）。  
@@ -163,8 +193,12 @@ FastAPI（main.py）
 - **`langchain-community` → `BM25Retriever`**  
   - 本地 **BM25** 稀疏检索（依赖 `rank-bm25` 等）；检索阶段**不调用大模型**。  
   - **文件**：`main.py`（`SimpleRAGStore`）。
+- **LangGraph**  
+  - LangChain 生态下的 **状态图 / 工作流** 库：将 `UserIntentAgent` 内「天气优先 → LLM → 规则」固化为 **StateGraph** 节点与条件边，便于与 LangChain 工具链统一维护。  
+  - **文件**：`intent/intent_planning_graph.py`（`compile_user_intent_planning_graph`）；`intent/user_intent_agent.py`（懒编译图、`invoke` 取 `plan`）。  
+  - **依赖**：`requirements.txt` 中 `langgraph>=0.2.0,<0.3`（大版本升级时需对照 LangGraph 迁移说明调整 API）。
 - **依赖包**  
-  - **文件**：`requirements.txt`（`langchain`、`langchain-openai`、`langchain-community`、`rank-bm25`）。
+  - **文件**：`requirements.txt`（`langchain`、`langgraph`、`langchain-openai`、`langchain-community`、`rank-bm25`）。
 
 ### 6. HTTP 与外部地理 / 路径服务
 
@@ -258,7 +292,7 @@ FastAPI（main.py）
 - **Base URL**：**优先 `DEEPSEEK_BASE_URL`（及 `/v1` 处理）**；否则 **`OPENAI_BASE_URL`**；若两者都未配置，则根据**最终生效的是哪类 Key**选择默认端点——仅配 DeepSeek Key 时为 `https://api.deepseek.com/v1`，仅配 `OPENAI_API_KEY` 时为 `https://api.openai.com/v1`。  
 - **模型 ID**：**优先 `DEEPSEEK_MODEL_ID`**，否则 **`OPENAI_MODEL`**；若都未写，则根据 Key 类型默认 **`deepseek-chat`** 或 **`gpt-4o-mini`**；无任何 Key 时占位默认仍为 **`deepseek-chat`**（此时不会真正发起请求，因 `_build_llm` 要求 Key 非空）。
 
-**未配置任何可用 Key** 时：`self.llm` 为 `None`，**`llm_enabled` 为假**，意图与动作完全走 **`_plan_by_rules`**；`GET /health` 会反映是否启用模型。
+**未配置任何可用 Key** 时：`self.llm` 为 `None`，**`llm_enabled` 为假**，意图与动作完全走 **`_plan_by_rules`**（经 **`IntentOrchestratorAgent`** 规则链）；`GET /health` 会反映是否启用模型。
 
 **`GET /debug/config`** 中布尔字段为 **`llm_api_configured`**（表示是否配置了任一兼容 Chat API 的 Key），不再使用 `openai_configured` 命名。
 
@@ -281,7 +315,7 @@ FastAPI（main.py）
 
 - **`_plan`**  
   - 若 **`llm_enabled`**：依次调用 **`_plan_by_llm`** → **`_post_process_llm_plan`**，若结果满足 **`_is_usable_plan`**（意图在枚举内且 `actions` 为列表等），则**采用该计划**。  
-  - 若模型未启用、调用抛错、或 JSON 无效、或计划不可用：回落 **`_plan_by_rules`**（关键词与历史启发式）。  
+  - 若模型未启用、调用抛错、或 JSON 无效、或计划不可用：回落 **`_plan_by_rules`**（内部委托 **`IntentOrchestratorAgent.plan_rules`**，按路况/路径/通用子模块顺序匹配关键词与历史启发式）。  
   - 若本已启用 LLM 且**尝试过**但回落到规则，会把 **`used_llm=True`** 写入规则计划，便于前端/日志区分「模型参与过但未果」。
 
 - **`_plan_by_llm`**  
@@ -318,7 +352,7 @@ FastAPI（main.py）
 | `llm_enabled`（property） | 是否已创建 `ChatOpenAI` 实例 |
 | `_build_llm` / `_build_answer_chain` | 构造规划用与 RAG 答问用链 |
 | `chat` | 编排检索、规划、工具、渲染与 `used_llm` |
-| `_plan` / `_plan_by_llm` / `_plan_by_rules` | 规划主入口与两路实现 |
+| `_plan` / `_plan_by_llm` / `_plan_by_rules` | 规划主入口与两路实现；规则回落委托 `IntentOrchestratorAgent` |
 | `_post_process_llm_plan` / `_parse_llm_plan_json` / `_is_usable_plan` | 解析与校验模型规划输出 |
 | `_render_reply` | 合并 `llm_reply`、工具结果模板与 `answer_chain` |
 | `_history_to_text` / `_extract_recent_route_context` / `_rag_to_text` | 拼进规划提示的上下文 |
@@ -329,7 +363,8 @@ FastAPI（main.py）
 
 | 路径 | 说明 |
 |------|------|
-| `main.py` | 后端单体：智能体、RAG、工具、路径与路况、鉴权、路由、静态入口逻辑 |
+| `main.py` | 后端单体：智能体、RAG、工具、路径与路况、天气渲染（含衣着建议）、鉴权、路由、静态入口逻辑 |
+| `intent/` | **编排式多智能体·意图层**：`UserIntentAgent`、`intent_planning_graph.py`（LangGraph）、调度中枢与子智能体 |
 | `frontend/` | Vue 3 + Vite 源码 |
 | `frontend/vite.config.js` | 构建到 `static-vue/`、`base` 配置 |
 | `static-vue/` | 构建产物（存在则 `GET /` 优先返回此 SPA） |

@@ -4,6 +4,7 @@ pydantic
 python-dotenv
 requests
 langchain
+langgraph>=0.2.0,<0.3
 langchain-openai
 langchain-community
 rank-bm25

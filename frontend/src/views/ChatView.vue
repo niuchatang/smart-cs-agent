@@ -184,7 +184,8 @@ async function ensureAuth() {
 
 function initMap() {
   if (!mapRef.value || map) return
-  map = L.map(mapRef.value, { zoomControl: true, scrollWheelZoom: false }).setView([35.8617, 104.1954], 4)
+  // scrollWheelZoom：允许鼠标滚轮缩放；与页面纵向滚动同用时，仅在指针悬停地图时生效
+  map = L.map(mapRef.value, { zoomControl: true, scrollWheelZoom: true }).setView([35.8617, 104.1954], 4)
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap',

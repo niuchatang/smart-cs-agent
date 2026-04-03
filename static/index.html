@@ -1616,7 +1616,7 @@
         initMap() {
           routeMap = L.map("routeMap", {
             zoomControl: true,
-            scrollWheelZoom: false,
+            scrollWheelZoom: true,
           }).setView([35.8617, 104.1954], 4);
           L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
             maxZoom: 19,
