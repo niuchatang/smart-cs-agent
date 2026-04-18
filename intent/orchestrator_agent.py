@@ -1,16 +1,17 @@
 """
 调度中枢智能体（Intent Orchestrator Agent）
 
-统一编排子智能体调用顺序，保持与原 UserIntentAgent._plan_by_rules 等价的优先级：
+统一编排子智能体调用顺序：
 
 1. 路况：显式高速编号
 2. 通用：天气规则
 3. 路况：肯定答复 / 起终点+路况（走廊）
-4. 路径：纯路径规划
-5. 路况：历史路线高速、泛路况等
-6. 扩展：`AgentRegistry` 注册的可插拔子智能体（ETC / 服务区 / 出发时间 /
-   事故告警 / 天气影响 / 无障碍 / 澄清 等），**默认启用**但仅在既有四类分支
-   都未命中时才尝试，不改变原有优先级；
+4. 扩展：`AgentRegistry` 注册的可插拔子智能体（ETC / 服务区 / 出发时间 /
+   事故告警 / 天气影响 / 无障碍 / 澄清 等）。放在纯路径规划**之前**，
+   避免「成都到重庆的最佳出行时间」这类含 OD 的垂直领域提问被路径规划
+   以 OD 为由抢先返回；扩展链内部按 priority 升序尝试。
+5. 路径：纯路径规划
+6. 路况：历史路线高速、泛路况等
 7. 通用：公交实时、票价、工单、unknown。
 
 天气多轮对话仍由 WeatherDialogAgent 在 UserIntentAgent 最前拦截（不经本调度器规则链）。
@@ -61,13 +62,13 @@ class IntentOrchestratorAgent:
         p = self._road.try_mid_od_corridor(message, hist)
         if p is not None:
             return p
+        p = self._registry.try_plan(message, hist)
+        if p is not None:
+            return p
         p = self._route.try_rule_plan(message, hist)
         if p is not None:
             return p
         p = self._road.try_late_corridor(message, hist)
-        if p is not None:
-            return p
-        p = self._registry.try_plan(message, hist)
         if p is not None:
             return p
         return self._general.try_tail_rules(message, hist)
