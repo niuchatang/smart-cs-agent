@@ -93,6 +93,89 @@
 
 ---
 
+## 多智能体扩展（本轮升级）
+
+本轮升级遵循两条硬约束：**不改动 `main.py` 主干** + **跳过需要专属/内部系统的能力**。所有改造通过 `intent/` 子系统和四个新模块（`tools_infra/`、`safety/`、`rag/`、`evaluation/`）落地，并用 `tests/` 兜单测。详细接入示例见 **`UPGRADES.md`**，速览见 **`UPGRADE_SUMMARY.md`**。
+
+### 1. 可插拔扩展底座：`AgentRegistry`
+
+- **文件**：`intent/agent_registry.py`（`AgentRegistry` + `ExtensionAgent` 协议）、`intent/orchestrator_agent.py`（接入 registry）。
+- **挂点**：`IntentOrchestratorAgent.plan_rules` 中，于 `try_late_corridor` 之后、`try_tail_rules` 之前，按 `priority` 升序尝试 `registry.try_plan(message, history)`。
+- **关闭方式**：`IntentOrchestratorAgent(..., enable_extensions=False)`。
+- **设计理念**：所有扩展复用既有 `IntentType` 枚举，通过 `actions` / `llm_reply` 承载新业务，**不修改 `main.IntentType` 与 Pydantic 模型**。
+
+### 2. 新增子智能体（16 个）
+
+**自动挂到规则链（按优先级生效）：**
+
+| 优先级 | 智能体 | 文件 | 职责 |
+|---|---|---|---|
+| 20 | `ETCChargeAgent` | `intent/etc_charge_agent.py` | ETC / 过路费估算，节假日免费提醒 |
+| 30 | `ServiceAreaAgent` | `intent/service_area_agent.py` | 路线上的服务区 / 充电站 / 加油站 |
+| 35 | `DepartureTimeAgent` | `intent/departure_time_agent.py` | 最佳出发时间（早晚高峰 / 节假日启发式） |
+| 40 | `TrafficIncidentAgent` | `intent/traffic_incident_agent.py` | 事故 / 管制 / 封路主动查询 |
+| 50 | `WeatherImpactAgent` | `intent/weather_impact_agent.py` | 雨 / 雾 / 雪 / 大风 / 高温对驾驶的建议 |
+| 60 | `AccessibilityAgent` | `intent/accessibility_agent.py` | 无障碍出行（轮椅、导盲犬、无障碍设施） |
+| 85 | `ClarifyAgent` | `intent/clarify_agent.py` | 低置信度时主动追问缺失要素 |
+
+**按需显式调用（留接入点，未强绑主流程）：**
+
+| 智能体 | 文件 | 职责 |
+|---|---|---|
+| `GuardrailAgent` | `intent/guardrail_agent.py` | 入站查 prompt injection + PII 脱敏；出站扫描承诺性话术 |
+| `MultilingualAgent` | `intent/multilingual_agent.py` | 中 / 日 / 韩 / 俄 / 英 / 粤语识别 + 可选翻译 |
+| `ComplaintTriageAgent` | `intent/complaint_triage_agent.py` | 投诉分级（low / medium / high / urgent） |
+| `FAQAgent` | `intent/faq_agent.py` | 专职 RAG 问答 + 引用渲染 |
+| `ProfileAgent` | `intent/profile_agent.py` | 从消息抽用户偏好，落盘 `data/user_profiles.json` |
+| `ConversationSummarizer` | `intent/summarizer.py` | 历史折叠成摘要，缩 prompt 长度 |
+| `ToolRouterAgent` | `intent/tool_router_agent.py` | 工具失败 / 空结果时给回退方案 |
+| `SatisfactionAgent` | `intent/satisfaction_agent.py` | 会话结束弹满意度，写 `data/satisfaction.jsonl` |
+| `EvalAgent` | `intent/eval_agent.py` | 离线意图回归评测，CLI 可调用 |
+
+### 3. 新增基础设施模块
+
+| 模块 | 关键能力 | 关键文件 |
+|---|---|---|
+| `tools_infra/` | `TTLCache`（OrderedDict + LRU + TTL，线程安全）、`@cached` 装饰器；`ToolSpec`（schema / timeout / retry / fallback / cache）+ `ToolRunner`（熔断计数） | `tools_infra/cache.py`、`tools_infra/registry.py` |
+| `safety/` | `mask_pii` / `pii_hits` / `scan_forbidden` / `sanitize_reply`，与 Guardrail 规则等价，可在非 Agent 处复用 | `safety/pii.py`、`safety/moderation.py` |
+| `rag/` | `HybridRetriever`：BM25 + 可选向量检索，用 **RRF** 融合；无向量模型时自动退化为纯 BM25 | `rag/hybrid_retriever.py` |
+| `evaluation/` | 离线意图回归：`intent_cases.jsonl`（20 条用例）+ `python -m evaluation.eval` | `evaluation/eval.py`、`evaluation/intent_cases.jsonl` |
+| `tests/` | 单测覆盖 guardrail / registry / summarizer / tools 缓存 | `tests/test_*.py` |
+
+### 4. 触发示例（快速验证）
+
+启动后在前端或 `/docs` 直接丢以下话术：
+
+| 话术 | 应命中 |
+|---|---|
+| `广州到深圳ETC大概多少钱` | `ETCChargeAgent` |
+| `这条路线上有哪些服务区` | `ServiceAreaAgent` |
+| `明天几点出发最合适` | `DepartureTimeAgent` |
+| `下雨天开高速要注意什么` | `WeatherImpactAgent` |
+| `G4京港澳今天有事故吗` | `TrafficIncidentAgent` |
+| `轮椅能上高铁吗` | `AccessibilityAgent` |
+| `查路线`（信息不全） | `ClarifyAgent` |
+
+命令行验证：
+
+```bash
+python -m pytest -q tests
+python -m evaluation.eval --cases evaluation/intent_cases.jsonl
+```
+
+### 5. 故意没做的（依赖内部系统）
+
+| 跳过项 | 原因 | 已留好的扩展点 |
+|---|---|---|
+| 真实工单 / CRM / 坐席队列 | 需要内部 CRM API | `ComplaintTriageAgent` + `AgentRegistry` |
+| 12306 / 航司 / 地铁实时数据 | 需要专属数据源授权 | `ToolRunner` + `AgentRegistry` |
+| 高速集团官方事故公告抓取 | 需要内部公告系统 | `TrafficIncidentAgent` + `ToolRunner` |
+| 真实满意度后台 / BI | 需要内部报表系统 | `SatisfactionAgent` 已把数据落到 jsonl |
+| LangSmith / OpenTelemetry trace | 需要外部账号 | `ToolRunner` 有打点位 |
+| 语音 / 流式前端 | 需要改 Vue + WebSocket | 暂未改前端 |
+
+---
+
 ## 意图类型（Intent）
 
 代码中与规划、回复逻辑一致的意图包括：
@@ -119,12 +202,18 @@ FastAPI（main.py）
     ├─ 鉴权（MySQL：用户、会话）
     ├─ POST /chat → CustomerServiceAgent（主智能体）.chat()
     │       ├─ 读历史（conversations.json）
-    │       ├─ RAG 检索（BM25）
+    │       ├─ RAG 检索（BM25；可选升级为 HybridRetriever = BM25 + 向量 + RRF）
     │       ├─ UserIntentAgent.parse() → LangGraph 意图状态图（intent/intent_planning_graph.py）
     │       │       weather 节点：WeatherDialogAgent
     │       │       → llm 节点：可选结构化规划
-    │       │       → rules 节点：IntentOrchestratorAgent → Road / Route / General
-    │       ├─ 执行工具 → tool_results[]
+    │       │       → rules 节点：IntentOrchestratorAgent
+    │       │               ├─ Road / Route / General 既有子智能体
+    │       │               └─ AgentRegistry（本轮升级）
+    │       │                   ETC / ServiceArea / DepartureTime /
+    │       │                   TrafficIncident / WeatherImpact /
+    │       │                   Accessibility / Clarify …… 按 priority 尝试
+    │       ├─ 执行工具 → tool_results[]（可选走 ToolRunner：cache / retry / 熔断 / fallback）
+    │       ├─ Guardrail / ComplaintTriage / ProfileAgent（按需显式调用）
     │       └─ 渲染 reply + follow_ups
     └─ 静态资源：/static-vue/ 或 static/
 ```
@@ -364,13 +453,20 @@ FastAPI（main.py）
 | 路径 | 说明 |
 |------|------|
 | `main.py` | 后端单体：智能体、RAG、工具、路径与路况、天气渲染（含衣着建议）、鉴权、路由、静态入口逻辑 |
-| `intent/` | **编排式多智能体·意图层**：`UserIntentAgent`、`intent_planning_graph.py`（LangGraph）、调度中枢与子智能体 |
+| `intent/` | **编排式多智能体·意图层**：`UserIntentAgent`、`intent_planning_graph.py`（LangGraph）、调度中枢、16 个子智能体、`AgentRegistry` 扩展底座 |
+| `tools_infra/` | **本轮新增**：`TTLCache` + `ToolSpec` + `ToolRunner`（重试 / 熔断 / 回退 / 缓存） |
+| `safety/` | **本轮新增**：PII 脱敏、出站内容审核（可在非 Agent 侧复用） |
+| `rag/` | **本轮新增**：`HybridRetriever`（BM25 + 可选向量检索 + RRF 融合） |
+| `evaluation/` | **本轮新增**：离线意图回归评测用例与 CLI |
+| `tests/` | **本轮新增**：guardrail / registry / summarizer / tools 单测 |
+| `UPGRADES.md` / `UPGRADE_SUMMARY.md` | **本轮新增**：升级接入手册与速览 |
 | `frontend/` | Vue 3 + Vite 源码 |
 | `frontend/vite.config.js` | 构建到 `static-vue/`、`base` 配置 |
 | `static-vue/` | 构建产物（存在则 `GET /` 优先返回此 SPA） |
 | `static/index.html`、`static/login.html` | 无构建时的双页前端 |
 | `data/knowledge_base.json` | RAG 知识库 |
-| `data/conversations.json` | 多轮对话记录（可很大，注意备份与隐私） |
+| `data/conversations.json` | 多轮对话记录（可很大，注意备份与隐私；已加入 `.gitignore`） |
+| `data/user_profiles.json` / `data/satisfaction.jsonl` | **本轮新增**：用户画像与满意度落盘（运行期生成，已 `.gitignore`） |
 | `requirements.txt` | Python 依赖 |
 | `.env.example` / `.env` | 环境变量模板与实际配置 |
 | `Dockerfile` / `docker-compose.yml` | 容器化构建与一键编排（含 MySQL） |
@@ -535,10 +631,21 @@ docker run --rm -p 8010:8010 \
 
 ## 后续可扩展方向
 
-- 接入真实公交/地铁/路况数据源与工单系统（CRM）。
-- BM25 之外增加向量检索（FAISS、PGVector、Elasticsearch）。
-- 多意图并行、更细的路由策略与审计日志。
-- 前端与地图样式、无障碍与国际化。
+### 本轮已落地（详见「多智能体扩展」章节）
+
+- ✅ 多意图扩展与插拔（`AgentRegistry` + 16 个新子智能体）
+- ✅ BM25 之外的向量检索接入点（`rag/HybridRetriever`，缺向量模型时自动退化）
+- ✅ 工具层统一化（`tools_infra/` 的 cache / retry / circuit breaker / fallback）
+- ✅ 安全层（`safety/` PII 脱敏 + 出站审核 + `GuardrailAgent`）
+- ✅ 离线评测框架（`evaluation/` + `EvalAgent`）
+- ✅ 单元测试骨架（`tests/`）
+
+### 下一步（需要内部系统或前端改造）
+
+- 接入真实公交 / 地铁 / 路况数据源与工单系统（CRM）。
+- 接入 LangSmith / OpenTelemetry 做链路追踪与审计日志。
+- 前端与地图样式、无障碍与国际化；语音 / 流式输出（需要 Vue + WebSocket 改造）。
+- 把 Nominatim / 高德 / OSRM / Open-Meteo 等外呼迁到 `ToolRunner`，让 cache / retry / fallback 统一生效。
 
 ---
 
