@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 __pycache__/
@@ -6,3 +8,14 @@ __pycache__/
 *.egg-info/
 .DS_Store
 frontend/node_modules/
+
+# runtime data (可能包含用户输入，不应进入仓库)
+data/conversations.json
+data/user_profiles.json
+data/satisfaction.jsonl
+
+# logs / caches
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

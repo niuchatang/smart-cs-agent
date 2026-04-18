@@ -1,0 +1,24 @@
+# 意图回归集（JSON Lines）；# 开头为注释，空行被忽略
+# 每行一个用例：{"user": "...", "expected_intent": "...", "must_call_tool": "..."}
+# must_call_tool 可省略
+
+{"user": "从南京到上海怎么走", "expected_intent": "route_planning", "must_call_tool": "query_route_plan"}
+{"user": "北京到天津驾车路线", "expected_intent": "route_planning", "must_call_tool": "query_route_plan"}
+{"user": "G2京沪高速现在好走吗", "expected_intent": "highway_condition", "must_call_tool": "query_highway_condition"}
+{"user": "G40路况怎么样", "expected_intent": "highway_condition", "must_call_tool": "query_highway_condition"}
+{"user": "有没有事故公告", "expected_intent": "highway_condition"}
+{"user": "上海天气怎么样", "expected_intent": "weather_query", "must_call_tool": "query_weather"}
+{"user": "上海、北京天气", "expected_intent": "weather_query", "must_call_tool": "query_weather"}
+{"user": "查询天气", "expected_intent": "weather_query"}
+{"user": "明天下大雨还能自驾吗", "expected_intent": "weather_query"}
+{"user": "高铁退票手续费怎么算", "expected_intent": "fare_policy"}
+{"user": "帮我估算北京到上海的ETC通行费", "expected_intent": "fare_policy"}
+{"user": "想退一张动车票", "expected_intent": "ticket_refund", "must_call_tool": "create_transport_ticket"}
+{"user": "我在车站丢了一个背包", "expected_intent": "lost_and_found", "must_call_tool": "create_transport_ticket"}
+{"user": "你们服务态度太差了我要投诉", "expected_intent": "complaint", "must_call_tool": "create_transport_ticket"}
+{"user": "转人工客服", "expected_intent": "human_handoff", "must_call_tool": "handoff_to_human"}
+{"user": "地铁2号线现在怎么样", "expected_intent": "realtime_status", "must_call_tool": "query_transit_status"}
+{"user": "几点出发比较不堵", "expected_intent": "route_planning"}
+{"user": "附近有什么服务区能充电", "expected_intent": "route_planning"}
+{"user": "带老人出行有什么无障碍建议", "expected_intent": "unknown"}
+{"user": "你好", "expected_intent": "unknown"}
