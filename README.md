@@ -26,7 +26,7 @@
 | 维度 | 说明 |
 |------|------|
 | **业务** | 路径规划、路况/管制、票价规则、退改签、失物招领、投诉与转人工等交通客服常见诉求 |
-| **架构** | **编排式多智能体**：主智能体执行工具与话术；意图层含调度中枢与路况/路径/通用/天气等子智能体（见「架构说明」） |
+| **架构** | **编排式多智能体**：主智能体执行工具与话术；认知层 Memory+Planner；意图层 LangGraph + 子 Agent 协作（详见 **[架构文档](docs/ARCHITECTURE.md)**） |
 | **技术** | RAG（BM25）增强知识问答；**LangGraph** 编排意图工作流；规则引擎优先、按需调用 LLM；结构化工具返回供前端地图与卡片展示 |
 | **用户** | 需注册/登录（MySQL 存用户与会话）；`user_id` 区分同一账号下的不同对话线程 |
 
@@ -70,9 +70,28 @@
 
 ---
 
+## 架构与升级文档
+
+| 文档 | 说明 |
+|---|---|
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | 系统架构全讲解、升级时间线、扩展指南（**推荐**） |
+| [UPGRADE_SUMMARY.md](UPGRADE_SUMMARY.md) | 各阶段升级速览 |
+| [docs/specs/memory_planner_upgrade.md](docs/specs/memory_planner_upgrade.md) | Memory + Planner 设计 |
+| [docs/specs/weather_gis.md](docs/specs/weather_gis.md) | 天气 GIS 行政区解析 |
+
+---
+
 ## 近期更新说明
 
 以下为实现层近期补充，便于对照代码与排查行为差异。
+
+### 认知层 Memory + Planner（2026-06）
+
+- **`CognitiveOrchestrator`**（`intent/cognitive_orchestrator.py`）：在 `UserIntentAgent` 上游增加 **Memory Agent**（长期记忆）与 **Planner Agent**（多任务规划）。
+- **Memory**：`memory_profile` / `memory_event` / `memory_summary` 三表；支持通勤路线、常住地、历史事件；工具 `MemorySearch/Save/Update/Delete`。
+- **Planner**：复杂目标（如「明天 A 到 B 几点出发」「未来三天适合去 X 吗」）生成多 Agent 执行计划，优先调用 `query_travel_decision` / `query_weather`。
+- **接入**：`main.py` 的 `chat()` 通过 `cognitive.parse(user_id=username)` 与 `after_turn()` 读写记忆。
+- 详见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** 第三、八节。
 
 ### 意图层多智能体（`intent/`）
 

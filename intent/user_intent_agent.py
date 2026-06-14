@@ -21,7 +21,8 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from .intent_planning_graph import compile_user_intent_planning_graph
 from .orchestrator_agent import IntentOrchestratorAgent
-from .weather_agent import WeatherDialogAgent
+from .travel_decision_agent import TravelDecisionAgent
+from .weather_agent import WeatherAgent
 
 
 class UserIntentAgent:
@@ -29,7 +30,8 @@ class UserIntentAgent:
 
     def __init__(self, service_agent: Any) -> None:
         self._svc = service_agent
-        self._weather_dialog = WeatherDialogAgent(service_agent)
+        self._travel_decision = TravelDecisionAgent(service_agent)
+        self._weather_dialog = WeatherAgent(service_agent)
         self._orchestrator = IntentOrchestratorAgent(service_agent)
         self._planning_graph: Any = None
 
@@ -290,6 +292,19 @@ class UserIntentAgent:
                 cities = params.get("cities")
                 clist = [str(x).strip() for x in cities] if isinstance(cities, list) else []
                 wp: Dict[str, Any] = {"cities": clist}
+                weather_queries = params.get("weather_queries")
+                if isinstance(weather_queries, list):
+                    wp["weather_queries"] = [x for x in weather_queries if isinstance(x, dict)]
+                for key in (
+                    "days",
+                    "include_aqi",
+                    "include_forecast",
+                    "include_warning",
+                    "include_travel_advice",
+                    "travel_date",
+                ):
+                    if key in params:
+                        wp[key] = params.get(key)
                 arq = params.get("along_route_queue")
                 if isinstance(arq, list) and arq:
                     wp["along_route_queue"] = [str(x).strip() for x in arq if str(x).strip()]
@@ -320,6 +335,7 @@ class UserIntentAgent:
             "realtime_status",
             "highway_condition",
             "weather_query",
+            "travel_decision",
             "fare_policy",
             "ticket_refund",
             "lost_and_found",

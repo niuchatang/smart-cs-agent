@@ -73,8 +73,9 @@ def default_extension_factories() -> List[AgentFactory]:
     """默认扩展集合：惰性导入，避免启动时循环引用。
 
     顺序（priority）说明见各 Agent 内常量；大致为：
-    20 ETCCharge → 30 ServiceArea → 35 DepartureTime → 40 TrafficIncident →
-    50 WeatherImpact → 60 Accessibility → 85 Clarify（未分类兜底最后兜）
+    20 ETCCharge → 30 ServiceArea → 32 ParkingLot → 35 DepartureTime →
+    40 TrafficIncident → 50 WeatherImpact → 60 Accessibility →
+    85 Clarify（未分类兜底最后兜）
     """
 
     def _etc(svc: Any):
@@ -86,6 +87,11 @@ def default_extension_factories() -> List[AgentFactory]:
         from .service_area_agent import ServiceAreaAgent
 
         return ServiceAreaAgent(svc)
+
+    def _pk(svc: Any):
+        from .parking_lot_agent import ParkingLotAgent
+
+        return ParkingLotAgent(svc)
 
     def _dt(svc: Any):
         from .departure_time_agent import DepartureTimeAgent
@@ -112,4 +118,4 @@ def default_extension_factories() -> List[AgentFactory]:
 
         return ClarifyAgent(svc)
 
-    return [_etc, _sa, _dt, _ti, _wi, _acc, _clarify]
+    return [_etc, _sa, _pk, _dt, _ti, _wi, _acc, _clarify]

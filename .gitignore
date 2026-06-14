@@ -13,6 +13,10 @@ frontend/node_modules/
 data/conversations.json
 data/user_profiles.json
 data/satisfaction.jsonl
+data/memory_store.json
+data/china_admin_boundaries.geojson
+
+.cursor/
 
 # logs / caches
 *.log

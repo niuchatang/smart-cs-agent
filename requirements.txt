@@ -9,3 +9,4 @@ langchain-openai
 langchain-community
 rank-bm25
 pymysql
+redis>=5
