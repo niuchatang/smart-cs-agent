@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from .message_signals import CASUAL_CHITCHAT_FALLBACK_REPLY, is_casual_chitchat
 from .weather_agent import WEATHER_CITY_CLARIFY_REPLY
 
 # 单城天气正则易误匹配：「查询天气」→ 曾把「查询」当成城市名
@@ -210,6 +211,14 @@ class GeneralIntentAgent:
                 "intent": "human_handoff",
                 "confidence": 0.95,
                 "actions": [{"tool": "handoff_to_human", "params": {"priority": "high"}}],
+                "used_llm": False,
+            }
+        if is_casual_chitchat(message):
+            return {
+                "intent": "unknown",
+                "confidence": 0.45,
+                "actions": [],
+                "llm_reply": CASUAL_CHITCHAT_FALLBACK_REPLY,
                 "used_llm": False,
             }
         return {"intent": "unknown", "confidence": 0.45, "actions": [], "used_llm": False}

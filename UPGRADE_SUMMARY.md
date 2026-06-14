@@ -1,21 +1,33 @@
-# Smart CS Agent 本轮升级汇总
+# Smart CS Agent 升级汇总（全记录）
 
-> 本文档是升级内容的**速览版**。详细的接入代码示例与优先级表请看 [`UPGRADES.md`](./UPGRADES.md)。
+> **完整架构讲解**见 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)（推荐先读）。  
+> 扩展 Agent 接入示例见 [`UPGRADES.md`](./UPGRADES.md)。  
+> Memory + Planner 专项设计见 [`docs/specs/memory_planner_upgrade.md`](./docs/specs/memory_planner_upgrade.md)。
 
-本轮升级遵循两条硬约束：
+---
 
-1. **不改动** `main.py` 的业务主干（4000+ 行，风险太大）；
-2. 涉及专属 / 内部系统的能力**先跳过**，只交付通用改造。
+## 升级时间线
+
+| 阶段 | 名称 | 文档章节 |
+|:---:|---|---|
+| A | 基础客服 + 工具 + RAG | ARCHITECTURE §二 |
+| B | LangGraph 意图图 + Orchestrator | ARCHITECTURE §四 |
+| C | AgentRegistry + 16 扩展 Agent + 基础设施 | 本文 §一～三 |
+| D | TravelDecision + GIS 天气区域 | 本文 §六 |
+| E | **Memory Agent + Planner Agent** | 本文 §七 |
+
+---
+
+## 一、阶段 C — 可插拔扩展（原「本轮升级」）
+
+> 当时约束：**尽量不改动** `main.py` 主干；专属系统能力跳过。  
+> 后续阶段 D/E 为增强出行与认知能力，对 `main.py` 做了**最小接入**（`CognitiveOrchestrator`）。
 
 所有改造通过 `intent/` 子系统 + 四个新模块（`tools_infra/`、`safety/`、`rag/`、`evaluation/`）落地，并用 `tests/` 兜单测。
 
 ---
 
-## 一、新增子智能体（16 个）
-
-全部位于 `smart-cs-agent/intent/`。
-
-### 1. 自动挂到规则链上（默认生效）
+### 1. 新增子智能体（16 个）
 
 在 `IntentOrchestratorAgent.plan_rules` 中，于 `try_late_corridor` 之后、`try_tail_rules` 之前调用 `AgentRegistry.try_plan(...)`，按 `priority` 升序尝试：
 
@@ -31,7 +43,9 @@
 
 可通过 `IntentOrchestratorAgent(..., enable_extensions=False)` 一键关闭整条扩展链。
 
-### 2. 按需显式调用（留接入点，未强绑主流程）
+全部位于 `smart-cs-agent/intent/`。
+
+#### 自动挂到规则链上（默认生效）
 
 | 智能体 | 文件 | 职责 |
 |---|---|---|
@@ -45,7 +59,7 @@
 | `SatisfactionAgent` | `intent/satisfaction_agent.py` | 会话结束弹满意度，写 `data/satisfaction.jsonl` |
 | `EvalAgent` | `intent/eval_agent.py` | 离线意图回归评测，CLI 可调用 |
 
-### 3. 让它们能插拔的底座
+#### 按需显式调用（留接入点，未强绑主流程）
 
 - `intent/agent_registry.py`：`AgentRegistry` + `ExtensionAgent` 协议（支持 `priority` / `name` / `try_plan`）；
 - `intent/orchestrator_agent.py`：多插一步 `self._registry.try_plan(message, history)`，把第 1 组自动接上；
@@ -53,7 +67,7 @@
 
 ---
 
-## 二、新增基础设施（4 个模块 + tests）
+#### 让它们能插拔的底座
 
 | 模块 | 关键能力 | 关键文件 |
 |---|---|---|
@@ -65,7 +79,7 @@
 
 ---
 
-## 三、故意没做的（需要内部系统）
+## 二、阶段 C — 新增基础设施（4 个模块 + tests）
 
 | 跳过项 | 原因 | 已留好的扩展点 |
 |---|---|---|
@@ -78,7 +92,7 @@
 
 ---
 
-## 四、验证方式
+## 三、阶段 C — 故意没做的（需要内部系统）
 
 ### 单测
 
@@ -118,10 +132,9 @@ uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 
 ---
 
-## 五、文件清单
+## 四、阶段 C — 验证方式
 
-```
-smart-cs-agent/
+## 五、阶段 C — 文件清单
 ├── intent/
 │   ├── agent_registry.py          # 新：Registry + ExtensionAgent 协议
 │   ├── orchestrator_agent.py      # 改：接入 registry
@@ -152,3 +165,62 @@ smart-cs-agent/
 ├── UPGRADES.md                    # 新：详细集成示例
 └── UPGRADE_SUMMARY.md             # 新：本文件
 ```
+
+---
+
+## 六、阶段 D — 出行决策 + GIS 天气区域（2026-06）
+
+| 升级项 | 文件 | 说明 |
+|---|---|---|
+| TravelDecisionAgent | `intent/travel_decision_agent.py` | 识别「从 A 到 B 几点出发」类意图 |
+| query_travel_decision | `main.py`, `tools_infra/travel_decision_tools.py` | 一站式：路线 + 天气 + 路况 + 风险评分 |
+| LangGraph 入口节点 | `intent/intent_planning_graph.py` | `travel_decision_node` 置于图最前 |
+| GIS MySQL 空间表 | `database/weather_gis_schema.sql` | `weather_admin_boundary` + `weather_admin_alias` |
+| GISLocationTool | `tools_infra/gis_location_tool.py` | 地名/坐标 → adcode，优先 MySQL ST_Contains |
+| 边界数据脚本 | `scripts/download_admin_boundaries.py` | 从阿里云 DataV 下载全国区县 GeoJSON |
+| | `scripts/import_admin_boundaries.py` | 导入 MySQL（509 区县） |
+
+**启用**：见 [`docs/specs/weather_gis.md`](./docs/specs/weather_gis.md)
+
+**验证话术**：`西青区天气` · `经度117.01 纬度39.14天气` · `明天从北京到天津适合几点出发`
+
+---
+
+## 七、阶段 E — Memory Agent + Planner Agent（2026-06 最新）
+
+| 升级项 | 文件 | 说明 |
+|---|---|---|
+| Memory 三表 | `database/memory_schema.sql` | profile / event / summary |
+| memory/ 模块 | `memory/agent.py` 等 | 长期记忆读写、规则抽取、4 个 Memory Tool |
+| planner/ 模块 | `planner/agent.py` 等 | 任务规划、规则拆解、LangGraph 决策图 |
+| CognitiveOrchestrator | `intent/cognitive_orchestrator.py` | Memory → Planner → Intent 认知编排 |
+| main.py 接入 | `CustomerServiceAgent.chat()` | `cognitive.parse()` + `after_turn()` |
+| 单测 | `tests/test_memory_agent.py` 等 | 7 条用例 |
+
+**环境变量**：
+
+```env
+MEMORY_ENABLE_MYSQL=true
+PLANNER_ENABLE=true
+COGNITIVE_ENABLE=true
+```
+
+**验证话术**：
+
+| 话术 | 能力 |
+|---|---|
+| `我每天从朝阳区到亦庄上班` | 写入通勤记忆 |
+| `今天几点出发` | Memory 补全 OD + Planner 出行决策 |
+| `未来三天适合去天津吗` | Planner 天气/AQI 综合 |
+
+**详细设计**：[`docs/specs/memory_planner_upgrade.md`](./docs/specs/memory_planner_upgrade.md)
+
+---
+
+## 八、当前推荐文档阅读顺序
+
+1. [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — **系统架构 + 全升级记录 + 扩展指南**
+2. [`UPGRADE_SUMMARY.md`](./UPGRADE_SUMMARY.md) — 本文，按阶段速览
+3. [`UPGRADES.md`](./UPGRADES.md) — 扩展 Agent 接入代码示例
+4. [`docs/specs/weather_gis.md`](./docs/specs/weather_gis.md) — GIS 专项
+5. [`docs/specs/memory_planner_upgrade.md`](./docs/specs/memory_planner_upgrade.md) — Memory/Planner 专项

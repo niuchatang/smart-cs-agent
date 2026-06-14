@@ -29,12 +29,21 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 from intent.user_intent_agent import UserIntentAgent
+from intent.cognitive_orchestrator import CognitiveOrchestrator
+from intent.message_signals import CASUAL_CHITCHAT_FALLBACK_REPLY, is_casual_chitchat, is_travel_knowledge_query
+from tools_infra.gis_location_tool import GISLocationTool
+from tools_infra.location_parser import LocationParser, ParsedWeatherQuery
+from tools_infra.travel_decision_tools import RouteGISService, RiskScorer, TravelDecisionFormatter
+from tools_infra.weather_cache import WeatherCache
+from tools_infra.weather_tools import GeoCodeTool, WeatherTool
+import tracking_integration as tracking
 
 IntentType = Literal[
     "route_planning",
     "realtime_status",
     "highway_condition",
     "weather_query",
+    "travel_decision",
     "fare_policy",
     "ticket_refund",
     "lost_and_found",
@@ -400,6 +409,25 @@ class CustomerServiceAgent:
         self.model = self._resolve_model()
         self.amap_api_key = os.getenv("AMAP_API_KEY", "").strip()
         self.amap_bypass_proxy = os.getenv("AMAP_BYPASS_PROXY", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self.weather_cache = WeatherCache(
+            ttl_seconds=int(os.getenv("WEATHER_CACHE_TTL_SECONDS", "600") or 600)
+        )
+        self.location_parser = LocationParser()
+        self.geo_tool = GeoCodeTool(
+            api_key=self.amap_api_key,
+            cache=self.weather_cache,
+            http_get=self._http_get,
+            bypass_proxy=self.amap_bypass_proxy,
+        )
+        self.gis_location_tool = GISLocationTool(cache=self.weather_cache)
+        self.weather_tool = WeatherTool(
+            api_key=self.amap_api_key,
+            cache=self.weather_cache,
+            geocode_tool=self.geo_tool,
+            gis_tool=self.gis_location_tool,
+            http_get=self._http_get,
+            bypass_proxy=self.amap_bypass_proxy,
+        )
         self.transit_status = {
             "地铁2号线": {"status": "正常", "next_train_min": 3, "notice": "高峰期行车间隔约3-4分钟"},
             "地铁4号线": {"status": "轻微延误", "next_train_min": 8, "notice": "设备检修导致部分区段降速"},
@@ -460,6 +488,7 @@ class CustomerServiceAgent:
         self.llm = self._build_llm()
         self.answer_chain = self._build_answer_chain()
         self.intent_agent = UserIntentAgent(self)
+        self.cognitive = CognitiveOrchestrator(self)
 
     @staticmethod
     def _resolve_api_key() -> str:
@@ -504,9 +533,20 @@ class CustomerServiceAgent:
     def llm_enabled(self) -> bool:
         return self.llm is not None
 
-    def chat(self, message: str, history: List[Dict[str, Any]] | None = None) -> ChatResponse:
+    def chat(
+        self,
+        message: str,
+        history: List[Dict[str, Any]] | None = None,
+        *,
+        memory_user_id: str = "",
+    ) -> ChatResponse:
         rag_hits = self.rag_store.retrieve(message, k=3)
-        plan = self.intent_agent.parse(message, history or [], rag_hits)
+        plan = self.cognitive.parse(
+            message,
+            history or [],
+            rag_hits,
+            user_id=memory_user_id,
+        )
         tool_results = self._execute_actions(plan["actions"])
         if plan.get("od_traffic_followup"):
             tool_results = self._append_highway_queries_for_od_route(tool_results)
@@ -517,7 +557,17 @@ class CustomerServiceAgent:
             llm_reply=plan.get("llm_reply", ""),
             rag_hits=rag_hits,
         )
+        meta = plan.get("meta") if isinstance(plan.get("meta"), dict) else {}
+        if meta.get("proactive_hint") and meta["proactive_hint"] not in reply:
+            reply = f"{reply}\n\n【记忆提示】{meta['proactive_hint']}"
+        if meta.get("planner") and meta.get("goal"):
+            reply = f"{reply}\n\n【规划目标】{meta['goal']}"
+        self.cognitive.after_turn(memory_user_id, message, plan, tool_results, reply=reply)
         rag_visible_for_intent = plan["intent"] in {"fare_policy", "unknown"}
+        if plan["intent"] == "unknown" and (
+            is_casual_chitchat(message) or not is_travel_knowledge_query(message)
+        ):
+            rag_visible_for_intent = False
         visible_rag_hits = rag_hits if rag_visible_for_intent else []
         follow_items = self._build_follow_ups(message, reply, plan["intent"], tool_results)
         return ChatResponse(
@@ -679,6 +729,13 @@ class CustomerServiceAgent:
     def _execute_actions(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
         last_highway_query_ts = 0.0
+
+        def _append_timed(r: Dict[str, Any], *, start: float) -> None:
+            ms = int((time.perf_counter() - start) * 1000)
+            out = dict(r)
+            out["latency_ms"] = ms
+            results.append(out)
+
         for action in actions:
             tool = action.get("tool", "")
             params = action.get("params", {})
@@ -686,16 +743,19 @@ class CustomerServiceAgent:
                 wp = params.get("waypoints")
                 if not isinstance(wp, list):
                     wp = None
-                results.append(
+                t0 = time.perf_counter()
+                _append_timed(
                     self._query_route_plan(
                         origin=params.get("origin", ""),
                         destination=params.get("destination", ""),
                         mode=params.get("mode", "driving"),
                         waypoints=wp,
-                    )
+                    ),
+                    start=t0,
                 )
             elif tool == "query_transit_status":
-                results.append(self._query_transit_status(params.get("target", "")))
+                t0 = time.perf_counter()
+                _append_timed(self._query_transit_status(params.get("target", "")), start=t0)
             elif tool == "query_highway_condition":
                 # Prevent triggering AMap QPS limits when querying multiple highways in one turn.
                 now = time.time()
@@ -711,34 +771,59 @@ class CustomerServiceAgent:
                 legacy_point = params.get("context_point")
                 if isinstance(legacy_point, dict):
                     parsed_points.append(legacy_point)
-                results.append(self._query_highway_condition(params.get("target", ""), context_points=parsed_points))
+                t0 = time.perf_counter()
+                _append_timed(
+                    self._query_highway_condition(params.get("target", ""), context_points=parsed_points),
+                    start=t0,
+                )
                 last_highway_query_ts = time.time()
             elif tool == "calculate_fare":
-                results.append(
+                t0 = time.perf_counter()
+                _append_timed(
                     self._calculate_fare(
                         origin=params.get("origin", ""),
                         destination=params.get("destination", ""),
                         mode=params.get("mode", "metro"),
-                    )
+                    ),
+                    start=t0,
                 )
             elif tool == "create_transport_ticket":
-                results.append(self._create_transport_ticket(params.get("issue_type", "general"), params.get("detail", "")))
+                t0 = time.perf_counter()
+                _append_timed(
+                    self._create_transport_ticket(params.get("issue_type", "general"), params.get("detail", "")),
+                    start=t0,
+                )
             elif tool == "handoff_to_human":
-                results.append(self._handoff_to_human(params.get("priority", "normal")))
+                t0 = time.perf_counter()
+                _append_timed(self._handoff_to_human(params.get("priority", "normal")), start=t0)
             elif tool == "query_weather":
                 raw_cities = params.get("cities")
                 cities_list: List[str] = [str(x).strip() for x in raw_cities] if isinstance(raw_cities, list) else []
                 arq = params.get("along_route_queue")
                 ari = params.get("along_route_index")
-                results.append(
+                weather_queries = params.get("weather_queries")
+                t0 = time.perf_counter()
+                _append_timed(
                     self._query_weather(
                         cities_list,
                         along_route_queue=arq if isinstance(arq, list) else None,
                         along_route_index=ari,
-                    )
+                        weather_queries=weather_queries if isinstance(weather_queries, list) else None,
+                        days=params.get("days"),
+                        include_aqi=params.get("include_aqi"),
+                        include_forecast=params.get("include_forecast"),
+                        include_warning=params.get("include_warning"),
+                        include_travel_advice=params.get("include_travel_advice"),
+                        travel_date=params.get("travel_date"),
+                    ),
+                    start=t0,
                 )
+            elif tool == "query_travel_decision":
+                t0 = time.perf_counter()
+                _append_timed(self._query_travel_decision(params), start=t0)
             else:
-                results.append({"tool": tool, "success": False, "error": f"unknown tool: {tool}"})
+                t0 = time.perf_counter()
+                _append_timed({"tool": tool, "success": False, "error": f"unknown tool: {tool}"}, start=t0)
         return results
 
     @staticmethod
@@ -785,7 +870,12 @@ class CustomerServiceAgent:
             wait_s = 0.35 - (now - last_hw_ts)
             if wait_s > 0:
                 time.sleep(wait_s)
-            out.append(self._query_highway_condition(hw, context_points=ctx))
+            t0 = time.perf_counter()
+            row = self._query_highway_condition(hw, context_points=ctx)
+            if isinstance(row, dict):
+                row = dict(row)
+                row["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+            out.append(row)
             last_hw_ts = time.time()
         return out
 
@@ -832,6 +922,11 @@ class CustomerServiceAgent:
     ) -> str:
         if llm_reply.strip():
             return llm_reply.strip()
+        if intent == "travel_decision":
+            td = next((x for x in tool_results if x.get("tool") == "query_travel_decision"), None)
+            if isinstance(td, dict):
+                return TravelDecisionFormatter.format(td)
+            return "暂时无法完成出行决策分析：缺少出行决策工具结果。"
         if intent == "weather_query":
             w = next((x for x in tool_results if x.get("tool") == "query_weather"), None)
             if isinstance(w, dict) and w.get("success"):
@@ -863,33 +958,64 @@ class CustomerServiceAgent:
                         live = cast(Dict[str, Any], live_raw) if isinstance(live_raw, dict) else {}
                         weather = str(live.get("weather", "")).strip()
                         temp = str(live.get("temperature", "")).strip()
-                        wind = str(live.get("winddirection", "")).strip() + str(live.get("windpower", "")).strip()
+                        wind_dir = str(live.get("winddirection", "")).strip()
+                        wind_power = str(live.get("windpower", "")).strip()
+                        wind = f"{wind_dir}{wind_power}级" if wind_power and "级" not in wind_power else f"{wind_dir}{wind_power}"
                         hum = str(live.get("humidity", "")).strip()
-                        live_bits: List[str] = []
+                        feels_like = str(block.get("feels_like", "") or "").strip()
+                        lines.append(f"【地区】{cname}")
+                        resolution_method = str(block.get("resolution_method", "") or "").strip()
+                        if resolution_method.startswith("gis_"):
+                            lines.append("【定位方式】GIS空间匹配")
+                        elif resolution_method:
+                            lines.append("【定位方式】高德地理编码回退")
+                        lines.append(f"【当前天气】{weather or '暂无实时天气描述'}")
                         if temp:
-                            live_bits.append(f"气温{temp}℃")
-                        if weather:
-                            live_bits.append(weather)
+                            lines.append(f"【温度】{temp}℃")
+                        if feels_like:
+                            lines.append(f"【体感温度】约{feels_like}℃")
                         if hum:
-                            live_bits.append(f"湿度{hum}%")
+                            lines.append(f"【湿度】{hum}%")
                         if wind:
-                            live_bits.append(wind)
+                            lines.append(f"【风力】{wind}")
                         cast0_raw = block.get("cast0")
                         cast0 = cast(Dict[str, Any], cast0_raw) if isinstance(cast0_raw, dict) else {}
-                        fc_line = ""
-                        if cast0:
+                        forecast_raw = block.get("forecast")
+                        forecast = cast(List[Dict[str, Any]], forecast_raw) if isinstance(forecast_raw, list) else []
+                        query_raw = block.get("query")
+                        query = cast(Dict[str, Any], query_raw) if isinstance(query_raw, dict) else {}
+                        if forecast and (query.get("include_forecast") or int(query.get("days", 1) or 1) > 1):
+                            lines.append("【未来天气】")
+                            for cast_item in forecast[: int(query.get("days", 3) or 3)]:
+                                date = str(cast_item.get("date", "")).strip()
+                                dayw = str(cast_item.get("dayweather", "")).strip()
+                                nightw = str(cast_item.get("nightweather", "")).strip()
+                                nt = str(cast_item.get("nighttemp", "")).strip()
+                                dt = str(cast_item.get("daytemp", "")).strip()
+                                weather_pair = dayw if not nightw or nightw == dayw else f"{dayw}转{nightw}"
+                                temp_pair = f"{nt}～{dt}℃".replace("～℃", "℃") if (nt or dt) else ""
+                                lines.append(f"- {date or '未来'}：{weather_pair or '—'} {temp_pair}".rstrip())
+                        elif cast0:
                             dayw = str(cast0.get("dayweather", "")).strip()
                             nt = str(cast0.get("nighttemp", "")).strip()
                             dt = str(cast0.get("daytemp", "")).strip()
                             if dayw or nt or dt:
-                                fc_line = f"明日预报 {dayw or '—'} {nt}～{dt}℃".replace("～℃", "℃")
-                        segm: List[str] = []
-                        if live_bits:
-                            segm.append("，".join(live_bits))
-                        if fc_line:
-                            segm.append(fc_line)
-                        extra = "；".join(segm) if segm else "详见气象服务"
-                        lines.append(f"- {cname}：{extra}（高德天气）")
+                                lines.append(f"【未来天气】{dayw or '—'} {nt}～{dt}℃".replace("～℃", "℃"))
+                        aqi_raw = block.get("aqi")
+                        aqi = cast(Dict[str, Any], aqi_raw) if isinstance(aqi_raw, dict) else {}
+                        if aqi.get("ok"):
+                            aqi_val = str(aqi.get("aqi", "")).strip()
+                            quality = str(aqi.get("quality", "")).strip()
+                            lines.append(f"【空气质量】AQI {aqi_val or '—'}，{quality or '暂无等级'}")
+                            advice = str(aqi.get("health_advice", "")).strip()
+                            if advice:
+                                lines.append(f"【健康建议】{advice}")
+                        else:
+                            lines.append("【空气质量】暂无 AQI 数据")
+                        travel_advice = str(block.get("travel_advice", "") or "").strip()
+                        if travel_advice:
+                            lines.append(f"【出行建议】{travel_advice}")
+                        lines.append("数据来源：高德天气")
                     else:
                         cur_raw = block.get("current")
                         cur = cast(Dict[str, Any], cur_raw) if isinstance(cur_raw, dict) else {}
@@ -1126,7 +1252,14 @@ class CustomerServiceAgent:
         if intent in {"ticket_refund", "lost_and_found", "complaint"}:
             ticket = tool_results[0]["ticket_id"] if tool_results else "N/A"
             return f"已帮你提交服务工单（{ticket}）。我们会尽快跟进处理，请留意后续通知。"
+        if intent == "unknown" and is_casual_chitchat(message):
+            return CASUAL_CHITCHAT_FALLBACK_REPLY
         if intent in {"fare_policy", "route_planning", "unknown"} and rag_hits:
+            if intent == "unknown" and not is_travel_knowledge_query(message):
+                return (
+                    f"我收到了你的问题：{message[:40]}。\n"
+                    "你可以再补充一下线路、站点、出发时间或目的地，我就能给你更准确的建议。"
+                )
             # Use RAG answer chain only for knowledge-heavy intents.
             if self.answer_chain is not None:
                 try:
@@ -1321,22 +1454,100 @@ class CustomerServiceAgent:
         except Exception as e:
             return {"city": city, "ok": False, "error": str(e)}
 
-    def _query_weather_single_city(self, city: str) -> Dict[str, Any]:
-        if self.amap_api_key:
-            hit = self._query_weather_amap(city)
-            if hit.get("ok"):
-                return hit
-        geo = self._geocode_place(self._normalize_place_name(city)) or self._lookup_builtin_coord(city)
-        if not geo:
-            return {"city": city, "ok": False, "error": "无法解析城市位置"}
-        return self._query_weather_openmeteo(city, float(geo["lat"]), float(geo["lon"]))
+    def _coerce_weather_query(
+        self,
+        city: str,
+        query: Dict[str, Any] | None = None,
+        defaults: Dict[str, Any] | None = None,
+    ) -> ParsedWeatherQuery:
+        data: Dict[str, Any]
+        if isinstance(query, dict) and query:
+            data = dict(query)
+        else:
+            data = self.location_parser.parse(f"{city}天气").dict()
+        defaults = defaults or {}
+        data["location_text"] = str(data.get("location_text") or city or "").strip()
+        if not data.get("raw_query"):
+            data["raw_query"] = f"{city}天气"
+        for key in (
+            "days",
+            "include_aqi",
+            "include_forecast",
+            "include_warning",
+            "include_travel_advice",
+            "travel_date",
+        ):
+            if defaults.get(key) is not None and key not in data:
+                data[key] = defaults.get(key)
+        if defaults.get("days") is not None:
+            try:
+                data["days"] = max(int(data.get("days") or defaults["days"]), int(defaults["days"]))
+            except (TypeError, ValueError):
+                pass
+        for key in ("include_aqi", "include_forecast", "include_warning", "include_travel_advice"):
+            if defaults.get(key) is not None:
+                data[key] = bool(data.get(key)) or bool(defaults.get(key))
+        if defaults.get("travel_date") and data.get("travel_date", "today") == "today":
+            data["travel_date"] = str(defaults["travel_date"])
+        return ParsedWeatherQuery(**data)
+
+    def _query_weather_single_city(
+        self,
+        city: str,
+        query: Dict[str, Any] | None = None,
+        defaults: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        parsed = self._coerce_weather_query(city, query=query, defaults=defaults)
+        hit = self.weather_tool.query(parsed)
+        if hit.get("ok"):
+            return hit
+
+        location = hit.get("location") if isinstance(hit.get("location"), dict) else {}
+        lat = location.get("lat") if isinstance(location, dict) else None
+        lon = location.get("lon") if isinstance(location, dict) else None
+        if lat is None or lon is None:
+            geo = self._geocode_place(self._normalize_place_name(city)) or self._lookup_builtin_coord(city)
+            if geo:
+                lat, lon = geo.get("lat"), geo.get("lon")
+        if lat is None or lon is None:
+            return hit if hit.get("error") else {"city": city, "ok": False, "error": "无法解析城市位置"}
+
+        fb = self._query_weather_openmeteo(parsed.location_text or city, float(lat), float(lon))
+        if fb.get("ok"):
+            fb["query"] = parsed.dict()
+            if isinstance(location, dict) and location:
+                fb["location"] = location
+            fb["aqi"] = {
+                "ok": False,
+                "aqi": "",
+                "quality": "暂无",
+                "health_advice": "Open-Meteo 兜底不提供 AQI，请配置高德及空气质量接口后查询。",
+            }
+            fb["travel_advice"] = "请结合当地实时预警、降雨和交通信息安排出行。"
+            return fb
+        return hit
 
     def _query_weather(
         self,
         cities: List[str],
         along_route_queue: List[Any] | None = None,
         along_route_index: Any = None,
+        weather_queries: List[Any] | None = None,
+        days: Any = None,
+        include_aqi: Any = None,
+        include_forecast: Any = None,
+        include_warning: Any = None,
+        include_travel_advice: Any = None,
+        travel_date: Any = None,
     ) -> Dict[str, Any]:
+        defaults = {
+            "days": days,
+            "include_aqi": include_aqi,
+            "include_forecast": include_forecast,
+            "include_warning": include_warning,
+            "include_travel_advice": include_travel_advice,
+            "travel_date": travel_date,
+        }
         if isinstance(along_route_queue, list) and along_route_queue:
             try:
                 idx = int(along_route_index) if along_route_index is not None else 0
@@ -1370,7 +1581,7 @@ class CustomerServiceAgent:
                     "error": "途经天气序号无效",
                 }
             target_city = cleaned_queue[idx]
-            forecasts = [self._query_weather_single_city(target_city)]
+            forecasts = [self._query_weather_single_city(target_city, defaults=defaults)]
             ok_any = any(bool(x.get("ok")) for x in forecasts)
             if idx + 1 < len(cleaned_queue):
                 along_route_pending: Dict[str, Any] = {
@@ -1413,8 +1624,10 @@ class CustomerServiceAgent:
                 "error": "请说明要查的城市，或先规划路线再点追问里的天气。",
             }
         forecasts = []
-        for city in cleaned[:10]:
-            forecasts.append(self._query_weather_single_city(city))
+        query_rows = [x for x in (weather_queries or []) if isinstance(x, dict)]
+        for i, city in enumerate(cleaned[:10]):
+            q = query_rows[i] if i < len(query_rows) else None
+            forecasts.append(self._query_weather_single_city(city, query=q, defaults=defaults))
         ok_any = any(bool(x.get("ok")) for x in forecasts)
         return {
             "tool": "query_weather",
@@ -1422,6 +1635,104 @@ class CustomerServiceAgent:
             "cities": cleaned[:10],
             "forecasts": forecasts,
             "error": "" if ok_any else "未能获取天气数据",
+        }
+
+    def _query_travel_decision(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        origin = str(params.get("origin") or "").strip()
+        destination = str(params.get("destination") or "").strip()
+        mode = str(params.get("travel_mode") or "driving").strip() or "driving"
+        depart_time_text = str(params.get("depart_time_text") or "").strip()
+        if not origin or not destination:
+            return {
+                "tool": "query_travel_decision",
+                "success": False,
+                "error": "missing origin or destination",
+                "query": dict(params),
+            }
+
+        route_cache_key = f"travel-route:{mode}:{origin}:{destination}"
+        cached_route = self.weather_cache.get_json(route_cache_key)
+        if isinstance(cached_route, dict):
+            route = cached_route
+        else:
+            route = self._query_route_plan(origin=origin, destination=destination, mode=mode)
+            if route.get("success"):
+                self.weather_cache.set_json(route_cache_key, route, ttl_seconds=1800)
+        if not route.get("success"):
+            return {
+                "tool": "query_travel_decision",
+                "success": False,
+                "error": route.get("error", "route planning failed"),
+                "query": dict(params),
+                "route": route,
+            }
+
+        route_gis = RouteGISService(self.gis_location_tool, self.geo_tool)
+        route_areas = route_gis.areas_from_route(route, origin=origin, destination=destination)
+        if not route_areas:
+            route_areas = [
+                {"name": origin, "city": "", "district": origin, "level": "district"},
+                {"name": destination, "city": "", "district": destination, "level": "district"},
+            ]
+
+        weather_blocks: List[Dict[str, Any]] = []
+        seen_weather: set[str] = set()
+        for area in route_areas[:8]:
+            if not isinstance(area, dict):
+                continue
+            label = TravelDecisionFormatter._area_label(area)
+            if not label or label in seen_weather:
+                continue
+            seen_weather.add(label)
+            parsed = self.location_parser.parse(f"{label}未来两天天气")
+            q = parsed.model_dump()
+            q["include_forecast"] = True
+            q["include_aqi"] = True
+            q["include_warning"] = True
+            q["include_travel_advice"] = True
+            q["days"] = max(int(q.get("days") or 1), 2)
+            block = self._query_weather_single_city(label, query=q)
+            weather_blocks.append(block)
+
+        highway_results: List[Dict[str, Any]] = []
+        route_points = route.get("route_points")
+        context_points = self._probe_points_from_route_points_list(route_points) if isinstance(route_points, list) else []
+        highways = route.get("highways") if isinstance(route.get("highways"), list) else []
+        last_highway_query_ts = 0.0
+        for hw in [str(x).strip() for x in highways if str(x).strip()][:3]:
+            now = time.time()
+            wait_s = 0.35 - (now - last_highway_query_ts)
+            if wait_s > 0:
+                time.sleep(wait_s)
+            highway_results.append(self._query_highway_condition(hw, context_points=context_points))
+            last_highway_query_ts = time.time()
+
+        risk = RiskScorer.score(
+            route_result=route,
+            weather_blocks=weather_blocks,
+            highway_results=highway_results,
+        )
+        query = {
+            **dict(params),
+            "origin": origin,
+            "destination": destination,
+            "depart_time_text": depart_time_text,
+            "travel_mode": mode,
+        }
+        return {
+            "tool": "query_travel_decision",
+            "success": True,
+            "query": query,
+            "route": route,
+            "route_areas": route_areas,
+            "weather": weather_blocks,
+            "highway_conditions": highway_results,
+            "risk": risk.model_dump(),
+            "cache": {
+                "route_ttl_seconds": 1800,
+                "weather_ttl_seconds": int(os.getenv("WEATHER_CACHE_TTL_SECONDS", "600") or 600),
+                "gis": "permanent/database_or_24h_runtime_cache",
+            },
         }
 
     @staticmethod
@@ -4285,6 +4596,11 @@ def register(payload: RegisterRequest, response: Response) -> AuthResponse:
         user = auth_store.register(payload.username, payload.password)
         token, expires_at = auth_store.create_session(int(user["id"]))
         _set_session_cookie(response, token, expires_at)
+        tracking.track_session_start(
+            session_id=str(user["username"]),
+            user_id=str(user["username"]),
+            properties={"entry": "register"},
+        )
         return AuthResponse(ok=True, user=AuthUser(user_id=int(user["id"]), username=str(user["username"])))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -4298,6 +4614,11 @@ def login(payload: LoginRequest, response: Response) -> AuthResponse:
         user = auth_store.login(payload.username, payload.password)
         token, expires_at = auth_store.create_session(int(user["id"]))
         _set_session_cookie(response, token, expires_at)
+        tracking.track_session_start(
+            session_id=str(user["username"]),
+            user_id=str(user["username"]),
+            properties={"entry": "login"},
+        )
         return AuthResponse(ok=True, user=AuthUser(user_id=int(user["id"]), username=str(user["username"])))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
@@ -4308,9 +4629,23 @@ def login(payload: LoginRequest, response: Response) -> AuthResponse:
 @app.post("/auth/logout")
 def logout(request: Request, response: Response) -> Dict[str, Any]:
     token = request.cookies.get(SESSION_COOKIE, "").strip()
+    username = ""
     if token:
+        try:
+            session_user = auth_store.resolve_user_by_token(token)
+            if session_user:
+                username = str(session_user.get("username") or "")
+        except Exception:
+            username = ""
         auth_store.delete_session(token)
     response.delete_cookie(SESSION_COOKIE, path="/")
+    if username:
+        tracking.track_session_end(
+            session_id=username,
+            user_id=username,
+            properties={"reason": "logout"},
+        )
+        tracking.flush()
     return {"status": "ok"}
 
 
@@ -4348,7 +4683,9 @@ def debug_config() -> Dict[str, Any]:
 def chat(payload: ChatRequest, user: AuthUser = Depends(get_current_user)) -> ChatResponse:
     scoped_id = _scoped_conversation_id(user.username, payload.user_id)
     history = conversation_store.get(scoped_id, limit=10)
-    result = agent.chat(payload.message, history=history)
+    _trk_started = tracking.measure_start()
+    result = agent.chat(payload.message, history=history, memory_user_id=user.username)
+    _trk_latency_ms = tracking.measure_ms(_trk_started)
     conversation_store.append(scoped_id, "user", payload.message)
     conversation_store.append(
         scoped_id,
@@ -4362,6 +4699,20 @@ def chat(payload: ChatRequest, user: AuthUser = Depends(get_current_user)) -> Ch
             "follow_ups": [x.model_dump() for x in result.follow_ups],
         },
     )
+    tracking.track_turn(
+        session_id=scoped_id,
+        user_id=user.username,
+        user_message=payload.message,
+        intent=str(result.intent),
+        confidence=float(result.confidence),
+        used_llm=bool(result.used_llm),
+        reply=result.reply,
+        tool_results=result.tool_results,
+        latency_ms=_trk_latency_ms,
+        model_name=str(agent.model),
+        actions=[a.model_dump() for a in result.actions],
+    )
+    tracking.flush()
     return result
 
 

@@ -4,7 +4,7 @@
 ## 子智能体分层
 
 - **主链路（默认启用，顺序与原 `_plan_by_rules` 一致）**：
-  `WeatherDialogAgent` → LLM 规划 → `IntentOrchestratorAgent`（内部编排
+  `WeatherAgent` → LLM 规划 → `IntentOrchestratorAgent`（内部编排
   `RoadConditionAgent` / `RoutePlanningAgent` / `GeneralIntentAgent`）。
 - **扩展层（默认启用，位于 orchestrator 规则链尾部之前）**：
   `AgentRegistry` 托管 `ETCChargeAgent` / `ServiceAreaAgent` / `DepartureTimeAgent` /
@@ -34,7 +34,9 @@ from .service_area_agent import ServiceAreaAgent
 from .summarizer import ConversationSummarizer
 from .tool_router_agent import ToolRouterAgent
 from .traffic_incident_agent import TrafficIncidentAgent
+from .travel_decision_agent import TravelDecisionAgent
 from .user_intent_agent import UserIntentAgent
+from .weather_agent import WeatherAgent
 from .weather_impact_agent import WeatherImpactAgent
 
 __all__ = [
@@ -58,7 +60,9 @@ __all__ = [
     "ServiceAreaAgent",
     "ToolRouterAgent",
     "TrafficIncidentAgent",
+    "TravelDecisionAgent",
     "UserIntentAgent",
+    "WeatherAgent",
     "WeatherImpactAgent",
     "default_extension_factories",
 ]

@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from tools_infra.location_parser import LocationParser
+
 # 与 main._weather_followup_from_route 中 question 一致（肯定句，非疑问「是否」）
 WEATHER_ROUTE_CHIP = "查询途经城市天气"
 WEATHER_ROUTE_CHIP_ALT = (
@@ -581,4 +583,85 @@ class WeatherDialogAgent:
             if "涉及多条高速" in c or "请告诉我要展开哪一条" in c:
                 return True
             return False
+
+
+class WeatherAgent(WeatherDialogAgent):
+    """Weather Agent.
+
+    Responsibilities:
+    - understand current/forecast/AQI/travel-advice weather questions;
+    - parse city and district-level locations;
+    - produce a query_weather tool plan consumed by CustomerServiceAgent.
+
+    Tool chain:
+    LocationParser -> GeoCodeTool -> WeatherTool -> Response Formatter.
+    """
+
+    name = "weather"
+    priority = 18
+
+    def __init__(self, service_agent: Any, parser: LocationParser | None = None) -> None:
+        super().__init__(service_agent)
+        self._parser = parser or LocationParser()
+
+    def try_plan(self, message: str, history: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        msg = (message or "").strip()
+        if msg and self._parser.is_weather_query(msg):
+            parsed0 = self._parser.parse(msg)
+            if parsed0.longitude is not None and parsed0.latitude is not None:
+                return self._build_weather_plan(parsed0)
+
+        try:
+            legacy = super().try_plan(message, history)
+        except AttributeError:
+            legacy = None
+        if legacy is not None:
+            return legacy
+
+        if not msg or not self._parser.is_weather_query(msg):
+            return None
+        if self._should_defer_to_route_or_impact_agent(msg):
+            return None
+
+        parsed = self._parser.parse(msg)
+        if not parsed.location_text:
+            return {
+                "intent": "weather_query",
+                "confidence": 0.82,
+                "actions": [],
+                "llm_reply": WEATHER_CITY_CLARIFY_REPLY,
+                "used_llm": False,
+            }
+        if "、" in parsed.location_text or "，" in parsed.location_text or "," in parsed.location_text:
+            return None
+
+        return self._build_weather_plan(parsed)
+
+    def _build_weather_plan(self, parsed: Any) -> Dict[str, Any]:
+        return {
+            "intent": "weather_query",
+            "confidence": self._confidence(parsed.location_text),
+            "actions": [{"tool": "query_weather", "params": parsed.to_tool_params()}],
+            "used_llm": False,
+            "meta": {"weather_agent": "WeatherAgent", "weather_query": parsed.dict()},
+        }
+
+    @staticmethod
+    def _confidence(location_text: str) -> float:
+        if any(s in location_text for s in ("区", "县", "新区")):
+            return 0.94
+        return 0.9
+
+    @staticmethod
+    def _should_defer_to_route_or_impact_agent(message: str) -> bool:
+        roadish = any(
+            k in message
+            for k in ("高速", "路况", "拥堵", "堵车", "事故", "管制", "封路", "好走", "开车", "驾驶")
+        )
+        if roadish:
+            return True
+        if any(k in message for k in ("沿途", "途经", "途径", "这条路线", "刚才路线", "刚规划", "路线天气")):
+            return True
+        if re.search(r"[\u4e00-\u9fff]{2,12}\s*到\s*[\u4e00-\u9fff]{2,12}.*(?:天气|气温)", message):
+            return True
         return False

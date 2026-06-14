@@ -1,7 +1,7 @@
 """
 用户意图规划工作流（LangGraph）
 
-用 LangChain 生态的 **LangGraph** 将「天气子智能体 → LLM 规划 → 规则编排」固化为状态图，
+用 LangChain 生态的 **LangGraph** 将「出行决策 → 天气子智能体 → LLM 规划 → 规则编排」固化为状态图，
 与原先 `UserIntentAgent._plan` 顺序与语义一致，便于可视化扩展与维护。
 
 说明：子智能体业务逻辑仍在各 `*Agent` 类中；本模块只负责 **编排**，不替代路况/路径等规则实现。
@@ -39,6 +39,14 @@ def compile_user_intent_planning_graph(user_intent_agent: Any):
             return {"plan": plan}
         return {}
 
+    def node_travel_decision(state: IntentPlanState) -> Dict[str, Any]:
+        msg = state.get("message") or ""
+        hist = state.get("history") or []
+        td = agent._travel_decision.try_plan(msg, hist)
+        if td is not None:
+            return {"plan": td}
+        return {}
+
     def node_llm(state: IntentPlanState) -> Dict[str, Any]:
         if not agent._svc.llm_enabled or agent._svc.llm is None:
             return {}
@@ -68,17 +76,26 @@ def compile_user_intent_planning_graph(user_intent_agent: Any):
     def route_after_weather(s: IntentPlanState) -> str:
         return "finalize" if s.get("plan") is not None else "llm"
 
+    def route_after_travel_decision(s: IntentPlanState) -> str:
+        return "finalize" if s.get("plan") is not None else "weather_node"
+
     def route_after_llm(s: IntentPlanState) -> str:
         return "finalize" if s.get("plan") is not None else "rules"
 
     graph = StateGraph(IntentPlanState)
-    graph.add_node("weather", node_weather)
+    graph.add_node("travel_decision_node", node_travel_decision)
+    graph.add_node("weather_node", node_weather)
     graph.add_node("llm", node_llm)
     graph.add_node("rules", node_rules)
     graph.add_node("finalize", node_finalize)
-    graph.set_entry_point("weather")
+    graph.set_entry_point("travel_decision_node")
     graph.add_conditional_edges(
-        "weather",
+        "travel_decision_node",
+        route_after_travel_decision,
+        {"finalize": "finalize", "weather_node": "weather_node"},
+    )
+    graph.add_conditional_edges(
+        "weather_node",
         route_after_weather,
         {"finalize": "finalize", "llm": "llm"},
     )
